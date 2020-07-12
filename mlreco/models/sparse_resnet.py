@@ -55,16 +55,9 @@ class SparseResNet(nn.Module):
             
         self.linear = nn.Linear(self.dim_out, self.num_output)
 
-        def freeze_params(m):
-            """Freeze all the weights by setting requires_grad to False
-            """
-            for p in m.parameters():
-                p.requires_grad = False
-
         self.apply(lambda m: freeze_params(m) if isinstance(m, SparseAffineChannel3d) else None)
     
     def forward(self, x):
-        x = x[0]
         coords = x[:, :self.dimension+1].float()
         features = x[:, self.dimension+1:].float()
         features = features[:, -1].view(-1, 1)
@@ -79,16 +72,12 @@ class SparseResNet(nn.Module):
         out = self.res3(out)
         out = self.res4(out)
 
-        out = self.pool(out)
+#         out = self.pool(out)
         out = self.desparsify(out)
-        out = out.view(batch_size, -1)
-        out = self.linear(out)
+#         out = out.view(batch_size, -1)
+#         out = self.linear(out)
         
-        res = {
-            'logits': [out]
-        }
-        
-        return res
+        return out
 
 class sparse_bottleneck(nn.Module):
     """ Sparse Bottleneck Residual Block """
@@ -174,3 +163,69 @@ class SparseAffineChannel3d(nn.Module):
     
         x.features = x.features * self.weight.view(1, self.num_features) + self.bias.view(1, self.num_features)
         return x
+    
+class ResNet_roi_conv5_head(nn.Module):
+    def __init__(self, dim_in, roi_xform_func, spatial_scale, validation=False):
+        super(ResNet_roi_conv5_head,self).__init__()
+        self.dimension = 3
+        self.roi_xform = roi_xform_func
+        self.spatial_scale = spatial_scale
+
+#         dim_bottleneck = cfg.RESNETS.NUM_GROUPS * cfg.RESNETS.WIDTH_PER_GROUP
+#         stride_init = cfg.FAST_RCNN.ROI_XFORM_RESOLUTION // 7
+        
+        self.dim_out = 2048
+        
+        self.sparsify = scn.DenseToSparse(self.dimension)
+        
+        self.res5 = scn.Sequential(sparse_bottleneck(self.dimension, 1024, 2048, dim_in, downsample=basic_bn_shortcut(self.dimension, 1024, 2048, 1)),
+            sparse_bottleneck(self.dimension, 2048, 2048, dim_in),
+            sparse_bottleneck(self.dimension, 2048, 2048, dim_in))
+        
+        self.desparsify = scn.SparseToDense(self.dimension, 2048)
+        
+        self.avgpool = nn.AvgPool3d(7)
+        self.validation = validation
+
+        self._init_modules()
+
+    def _init_modules(self):
+        # Freeze all bn (affine) layers !!!
+        self.apply(lambda m: freeze_params(m) if isinstance(m, SparseAffineChannel3d) else None)
+
+    def forward(self, x, rpn_ret):
+
+        x = self.roi_xform(
+            x, 
+            rpn_ret,
+            blob_rois='rois',
+            method='RoIAlign',
+            resolution=14,
+            spatial_scale=self.spatial_scale,
+            sampling_ratio=0
+        )
+        # print('x in RESNET.PY', x.shape)
+        
+#         import pdb; pdb.set_trace()
+
+        print(x.shape)
+        
+        sparse_x = self.sparsify(x.contiguous())
+        
+        res5_feat = self.res5(sparse_x)
+        
+        res5_feat = self.desparsify(res5_feat)
+        
+        # print('res5_feat in RESNET.PY', res5_feat.shape)
+        
+        x = self.avgpool(res5_feat)
+        if ( self.training or self.validation ):
+            return x, res5_feat
+        else:
+            return x
+
+def freeze_params(m):
+    """Freeze all the weights by setting requires_grad to False
+    """
+    for p in m.parameters():
+        p.requires_grad = False

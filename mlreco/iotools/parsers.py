@@ -123,41 +123,39 @@ def parse_3d_bbox(data):
     particles = data[1]
     
     def make_bbox(cluster):
-        
-        max_x = np.max(cluster[:,0])
-        min_x = np.min(cluster[:,0])
-        max_y = np.max(cluster[:,1])
-        min_y = np.min(cluster[:,1])
-        max_z = np.max(cluster[:,2])
-        min_z = np.min(cluster[:,2])
-#         print(np.unique(cluster[:,8]))
-        return [min_x, min_y, min_z, max_x, max_y, max_z, np.unique(cluster[:,8])]
+        if cluster[:,0].size != 0:
+            max_x = np.max(cluster[:,0])
+            min_x = np.min(cluster[:,0])
+            max_y = np.max(cluster[:,1])
+            min_y = np.min(cluster[:,1])
+            max_z = np.max(cluster[:,2])
+            min_z = np.min(cluster[:,2])
+            return [min_x, min_y, min_z, max_x, max_y, max_z, np.unique(cluster[:,8])[0]]
     
     np_voxels, np_features = parse_cluster3d_full(data)
     clusters = np.append(np_voxels, np_features, axis=1)
-    idxs = np.unique(clusters[:,4])
-    print("idxs:", idxs)
+    idxs = np.unique(clusters[:,4]) 
     
     boxes = []
     showers = []
     
-    print("p.shape:", [p.shape() for p in particles.as_vector()])
-    
     for idx in idxs:
-        print("idx:", idx)
-        p = particles.as_vector()[idx]
+        p = particles.as_vector()[int(idx)]
+        if p.shape() == larcv.kShapeLEScatter:
+            continue
         if p.shape() == larcv.kShapeShower:
             # only record a primary shower
             if p.group_id() == p.id():
                 showers.append(p.group_id())
             continue
-        boxes.append(make_bbox(clusters[np.where(clusters[:,4]==idx)]))
-    
-    print("boxes: ", boxes)
-    print("showers: ", showers)
+        if clusters[np.where(clusters[:,4]==idx)].size != 0:
+            boxes.append(make_bbox(clusters[np.where(clusters[:,4]==idx)]))
     
     for gid in np.unique(showers):
-        boxes.append(make_bbox(clusters[np.where(clusters[:,5]==gid)]))
+        if clusters[np.where(clusters[:,5]==gid)].size != 0:
+            boxes.append(make_bbox(clusters[np.where(clusters[:,5]==gid)]))
+        
+#     boxes = []
     
 #     for idx, c in enumerate(np.unique(clusters[:,5])):
 #         cluster = clusters[clusters[:,5]==c]
