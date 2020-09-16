@@ -6,6 +6,31 @@ from larcv import larcv
 from mlreco.utils.ppn import get_ppn_info
 from mlreco.utils.dbscan import dbscan_types
 from mlreco.utils.groups import filter_duplicate_voxels, filter_duplicate_voxels_ref, filter_nonimg_voxels
+import scipy
+
+def parse_roidb(data):
+    
+    bbox, clusters = parse_3d_bbox(data)
+    
+    roidb = {}
+    roidb['boxes'] = bbox[:,:6].astype(float)
+    roidb['segms'] = clusters[:,:3].astype(float)
+    roidb['clusters'] = clusters.astype(float)
+    roidb['gt_classes'] = (bbox[:,6:].reshape(len(roidb['boxes'])) + 1).astype(int)
+    
+
+    gt_overlaps = np.zeros((len(roidb['boxes']), 6)).astype(float)
+    box_to_gt_ind_map = np.zeros((len(roidb['boxes']))).astype(int)
+
+    for x in range(roidb['gt_classes'].shape[0]):
+        gt_overlaps[x][roidb['gt_classes'][x]] = 1
+
+    roidb['gt_overlaps'] = scipy.sparse.csr_matrix(gt_overlaps)
+    roidb['box_to_gt_ind_map'] = box_to_gt_ind_map
+    roidb['seg_areas'] = np.zeros((len(roidb['boxes'])))
+    
+    return roidb
+    
 
 def parse_particle_singlep_pdg(data):
     TYPE_LABELS = {
@@ -117,24 +142,40 @@ def parse_sparse3d_scn(data):
         larcv.fill_3d_pcloud(event_tensor3d, np_data)
         output.append(np_data)
     return np_voxels, np.concatenate(output, axis=-1)
-
+    
 def parse_3d_bbox(data):
     
     particles = data[1]
     
-    def make_bbox(cluster):
+    def make_bbox(cluster, shower=0):
         if cluster[:,0].size != 0:
+            # add/minus 0.5 to account for flat clusters
             max_x = np.max(cluster[:,0])
             min_x = np.min(cluster[:,0])
             max_y = np.max(cluster[:,1])
             min_y = np.min(cluster[:,1])
             max_z = np.max(cluster[:,2])
             min_z = np.min(cluster[:,2])
-            return [min_x, min_y, min_z, max_x, max_y, max_z, np.unique(cluster[:,8])[0]]
+            
+            if min_x != 0:
+                min_x -= 0.5
+            if min_y != 0:
+                min_y -= 0.5
+            if min_z != 0:
+                min_z -= 0.5
+            if max_x != 1023:
+                max_x += 0.5
+            if max_y != 1023:
+                max_y += 0.5
+            if max_z != 1023:
+                max_z += 0.5
+            
+            return [min_x, min_y, min_z, max_x, max_y, max_z, np.unique(cluster[:,8])[0], 
+                    np.unique(cluster[:,4])[0], np.unique(cluster[:,5]), shower]
     
     np_voxels, np_features = parse_cluster3d_full(data)
     clusters = np.append(np_voxels, np_features, axis=1)
-    idxs = np.unique(clusters[:,4]) 
+    idxs = np.unique(clusters[:,4])
     
     boxes = []
     showers = []
@@ -153,22 +194,10 @@ def parse_3d_bbox(data):
     
     for gid in np.unique(showers):
         if clusters[np.where(clusters[:,5]==gid)].size != 0:
-            boxes.append(make_bbox(clusters[np.where(clusters[:,5]==gid)]))
-        
-#     boxes = []
-    
-#     for idx, c in enumerate(np.unique(clusters[:,5])):
-#         cluster = clusters[clusters[:,5]==c]
-#         max_x = np.max(cluster[:,0])
-#         min_x = np.min(cluster[:,0])
-#         max_y = np.max(cluster[:,1])
-#         min_y = np.min(cluster[:,1])
-#         max_z = np.max(cluster[:,2])
-#         min_z = np.min(cluster[:,2])
-# #         print(np.unique(cluster[:,8]))
-#         boxes.append([min_x, min_y, min_z, max_x, max_y, max_z, np.unique(cluster[:,8])[0]])
-    
+            boxes.append(make_bbox(clusters[np.where(clusters[:,5]==gid)], shower=1))
+
     return boxes
+
 
 def parse_semantics(data):
     from larcv import larcv

@@ -14,7 +14,7 @@ from functools import reduce
 import operator
 
 import mlreco.models.utils.net as net_utils
-import mlreco.models.upsample as mynn
+# import mlreco.models.upsample as mynn
 
 #to Vis
 import numpy as np

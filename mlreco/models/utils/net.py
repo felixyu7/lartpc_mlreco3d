@@ -8,7 +8,193 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
+import math
 
+def bbox_transform(deltas, weights):
+    wx, wy, wz, ww, wh, wd = weights
+    dx = deltas[:, 0::6] / wx
+    dy = deltas[:, 1::6] / wy
+    dz = deltas[:, 2::6] / wz
+    dw = deltas[:, 3::6] / ww
+    dh = deltas[:, 4::6] / wh
+    dd = deltas[:, 5::6] / wd
+
+    dw = torch.clamp(dw, max=np.log(1000. / 16.))
+    dh = torch.clamp(dh, max=np.log(1000. / 16.))
+    dd = torch.clamp(dd, max=np.log(1000. / 16.))
+
+    pred_ctr_x = dx
+    pred_ctr_y = dy
+    pred_ctr_z = dz
+    pred_w = torch.exp(dw)
+    pred_h = torch.exp(dh)
+    pred_d = torch.exp(dd)
+
+    x1 = pred_ctr_x - 0.5 * pred_w
+    y1 = pred_ctr_y - 0.5 * pred_h
+    z1 = pred_ctr_z - 0.5 * pred_d
+    x2 = pred_ctr_x + 0.5 * pred_w
+    y2 = pred_ctr_y + 0.5 * pred_h
+    z2 = pred_ctr_z + 0.5 * pred_d
+
+    return x1.reshape(-1), y1.reshape(-1), z1.reshape(-1), x2.reshape(-1), y2.reshape(-1), z2.reshape(-1)
+
+def compute_ciou(output, target, bbox_inside_weights, bbox_outside_weights,
+                transform_weights=None):
+    if transform_weights is None:
+        transform_weights = (1., 1., 1., 1., 1., 1.)
+
+    bbox_inside_weights = bbox_inside_weights.contiguous()
+    bbox_outside_weights = bbox_outside_weights.contiguous()
+    
+    x1, y1, z1, x2, y2, z2 = bbox_transform(output, transform_weights)
+    x1g, y1g, z1g, x2g, y2g, z2g = bbox_transform(target, transform_weights)
+
+    x2 = torch.max(x1, x2)
+    y2 = torch.max(y1, y2)
+    y2 = torch.max(z1, z2)
+    w_pred = x2 - x1
+    h_pred = y2 - y1
+    d_pred = z2 - z1
+    w_gt = x2g - x1g
+    h_gt = y2g - y1g
+    d_gt = z2g - z1g
+
+    x_center = (x2 + x1) / 2
+    y_center = (y2 + y1) / 2
+    z_center = (z2 + z1) / 2
+    x_center_g = (x1g + x2g) / 2
+    y_center_g = (y1g + y2g) / 2
+    z_center_g = (z1g + z2g) / 2
+
+    xkis1 = torch.max(x1, x1g)
+    ykis1 = torch.max(y1, y1g)
+    zkis1 = torch.max(z1, z1g)
+    xkis2 = torch.min(x2, x2g)
+    ykis2 = torch.min(y2, y2g)
+    zkis2 = torch.min(z2, z2g)
+
+    xc1 = torch.min(x1, x1g)
+    yc1 = torch.min(y1, y1g)
+    zc1 = torch.min(z1, z1g)
+    xc2 = torch.max(x2, x2g)
+    yc2 = torch.max(y2, y2g)
+    zc2 = torch.max(z2, z2g)
+
+    intsctk = torch.zeros(x1.size()).to(output)
+    mask = (ykis2 > ykis1) * (xkis2 > xkis1) * (zkis2 > zkis1)
+    intsctk[mask] = (xkis2[mask] - xkis1[mask]) * (ykis2[mask] - ykis1[mask]) * (zkis2[mask] - zkis1[mask])
+    unionk = (x2 - x1) * (y2 - y1) * (z2 - z1) + (x2g - x1g) * (y2g - y1g) * (z2g - z1g) - intsctk + 1e-7
+    iouk = intsctk / unionk
+
+    c = ((xc2 - xc1) ** 2) + ((yc2 - yc1) ** 2) + ((zc2 - zc1) ** 2) + 1e-7
+    d = ((x_center - x_center_g) ** 2) + ((y_center - y_center_g) ** 2) + ((z_center - z_center_g) ** 2)
+    u = d / c
+    v = (4 / (math.pi ** 2)) * torch.pow((torch.atan(w_gt/h_gt)-torch.atan(w_pred/h_pred)),2)
+    v += (4 / (math.pi ** 2)) * torch.pow((torch.atan(w_gt/d_gt)-torch.atan(w_pred/d_pred)),2)
+    v += (4 / (math.pi ** 2)) * torch.pow((torch.atan(h_gt/d_gt)-torch.atan(h_pred/d_pred)),2)
+    v /= 3
+    with torch.no_grad():
+        S = 1 - iouk
+        alpha = v / (S + v)
+    ciouk = iouk - (u + alpha * v)
+    iou_weights = bbox_inside_weights.view(-1, 6).mean(1) * bbox_outside_weights.view(-1, 6).mean(1)
+    iouk = ((1 - iouk) * iou_weights).sum(0) / output.size(0)
+    ciouk = ((1 - ciouk) * iou_weights).sum(0) / output.size(0)
+
+    return ciouk
+
+def compute_giou(output, target, bbox_inside_weights, bbox_outside_weights,
+                transform_weights=None):
+    if transform_weights is None:
+        transform_weights = (1., 1., 1., 1., 1., 1.)
+
+    bbox_inside_weights = bbox_inside_weights.contiguous()
+    bbox_outside_weights = bbox_outside_weights.contiguous()
+    x1, y1, z1, x2, y2, z2 = bbox_transform(output, transform_weights)
+    x1g, y1g, z1g, x2g, y2g, z2g = bbox_transform(target, transform_weights)
+
+    x2 = torch.max(x1, x2)
+    y2 = torch.max(y1, y2)
+    z2 = torch.max(z1, z2)
+
+    xkis1 = torch.max(x1, x1g)
+    ykis1 = torch.max(y1, y1g)
+    zkis1 = torch.max(z1, z1g)
+    xkis2 = torch.min(x2, x2g)
+    ykis2 = torch.min(y2, y2g)
+    zkis2 = torch.min(z2, z2g)
+
+    xc1 = torch.min(x1, x1g)
+    yc1 = torch.min(y1, y1g)
+    zc1 = torch.min(z1, z1g)
+    xc2 = torch.max(x2, x2g)
+    yc2 = torch.max(y2, y2g)
+    zc2 = torch.max(z2, z2g)
+
+    intsctk = torch.zeros(x1.size()).to(output)
+    mask = (ykis2 > ykis1) * (xkis2 > xkis1) * (zkis2 > zkis1)
+    intsctk[mask] = (xkis2[mask] - xkis1[mask]) * (ykis2[mask] - ykis1[mask]) * (zkis2[mask] - zkis1[mask])
+    unionk = (x2 - x1) * (y2 - y1) * (z2 - z1) + (x2g - x1g) * (y2g - y1g) * (z2g - z1g) - intsctk + 1e-7
+    iouk = intsctk / unionk
+
+    area_c = (xc2 - xc1) * (yc2 - yc1) * (zc2 - zc1) + 1e-7
+    giouk = iouk - ((area_c - unionk) / area_c)
+    iou_weights = bbox_inside_weights.view(-1, 6).mean(1) * bbox_outside_weights.view(-1, 6).mean(1)
+    iouk = ((1 - iouk) * iou_weights).sum(0) / output.size(0)
+    giouk = ((1 - giouk) * iou_weights).sum(0) / output.size(0)
+
+    return giouk
+
+def compute_diou(output, target, bbox_inside_weights, bbox_outside_weights,
+                transform_weights=None):
+    if transform_weights is None:
+        transform_weights = (1., 1., 1., 1., 1., 1.)
+    x1, y1, z1, x2, y2, z2 = bbox_transform(output, transform_weights)
+    x1g, y1g, z1g, x2g, y2g, z2g = bbox_transform(target, transform_weights)
+
+    bbox_inside_weights = bbox_inside_weights.contiguous()
+    bbox_outside_weights = bbox_outside_weights.contiguous()
+    x2 = torch.max(x1, x2)
+    y2 = torch.max(y1, y2)
+    z2 = torch.max(z1, z2)
+
+    x_p = (x2 + x1) / 2
+    y_p = (y2 + y1) / 2
+    z_p = (z2 + z1) / 2
+    x_g = (x1g + x2g) / 2
+    y_g = (y1g + y2g) / 2
+    z_g = (z1g + z2g) / 2
+
+    xkis1 = torch.max(x1, x1g)
+    ykis1 = torch.max(y1, y1g)
+    zkis1 = torch.max(z1, z1g)
+    xkis2 = torch.min(x2, x2g)
+    ykis2 = torch.min(y2, y2g)
+    zkis2 = torch.min(z2, z2g)
+
+    xc1 = torch.min(x1, x1g)
+    yc1 = torch.min(y1, y1g)
+    zc1 = torch.min(z1, z1g)
+    xc2 = torch.max(x2, x2g)
+    yc2 = torch.max(y2, y2g)
+    zc2 = torch.max(z2, z2g)
+
+    intsctk = torch.zeros(x1.size()).to(output)
+    mask = (ykis2 > ykis1) * (xkis2 > xkis1) * (zkis2 > zkis1)
+    intsctk[mask] = (xkis2[mask] - xkis1[mask]) * (ykis2[mask] - ykis1[mask]) * (zkis2[mask] - zkis1[mask])
+    unionk = (x2 - x1) * (y2 - y1) * (z2 - z1) + (x2g - x1g) * (y2g - y1g) * (z2g - z1g) - intsctk + 1e-7
+    iouk = intsctk / unionk
+
+    c = ((xc2 - xc1) ** 2) + ((yc2 - yc1) ** 2) + ((zc2 - zc1) ** 2) + 1e-7
+    d = ((x_p - x_g) ** 2) + ((y_p - y_g) ** 2) + ((z_p - z_g) ** 2)
+    u = d / c
+    diouk = iouk - u
+    iou_weights = bbox_inside_weights.view(-1, 6).mean(1) * bbox_outside_weights.view(-1, 6).mean(1)
+    iouk = ((1 - iouk) * iou_weights).sum(0) / output.size(0)
+    diouk = ((1 - diouk) * iou_weights).sum(0) / output.size(0)
+
+    return diouk
 
 def smooth_l1_loss(bbox_pred, bbox_targets, bbox_inside_weights, bbox_outside_weights, beta=1.0):
     """
@@ -26,7 +212,7 @@ def smooth_l1_loss(bbox_pred, bbox_targets, bbox_inside_weights, bbox_outside_we
     out_loss_box = bbox_outside_weights * in_loss_box
     loss_box = out_loss_box
     N = loss_box.size(0)  # batch size
-    loss_box = loss_box.reshape(-1).sum(0) / N
+    loss_box = loss_box.contiguous().view(-1).sum(0) / N
     return loss_box
 
 

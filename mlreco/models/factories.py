@@ -35,8 +35,7 @@ def model_dict():
     from . import full_chain_5
     from . import full_cnn
     from . import particle_types
-    from . import sparse_resnet
-    from . import RPN
+    from . import sparse_resnet_singlep
     from . import maskrcnn
 
 
@@ -111,8 +110,8 @@ def model_dict():
         "full_chain": (full_chain_5.FullChain, full_chain_5.FullChainLoss),
         "full_cnn": (full_cnn.FullChain, full_cnn.FullChainLoss),
         "particle_type": (particle_types.ParticleImageClassifier, particle_types.ParticleTypeLoss),
-        "sparse_resnet": (sparse_resnet.SparseResNet, particle_types.ParticleTypeLoss), 
-        "maskrcnn": (maskrcnn.MaskRCNN, RPN.RPN_Loss),
+        "sparse_resnet_singlep": (sparse_resnet_singlep.SparseResNet, particle_types.ParticleTypeLoss),
+        "maskrcnn": (maskrcnn.MaskRCNN, maskrcnn.MaskRCNN_Loss),
         # Cluster grouping GNN with MST
         #"cluster_mst_gnn": (cluster_mst_gnn.MSTEdgeModel, cluster_mst_gnn.MSTEdgeChannelLoss),
     }

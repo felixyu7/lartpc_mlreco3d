@@ -47,43 +47,93 @@ from __future__ import unicode_literals
 
 import warnings
 import numpy as np
+import torch
 
 import mlreco.models.utils.cython_bbox as cython_bbox
 import mlreco.models.utils.cython_nms as cython_nms
+import mlreco.models.nms.nms as c_nms
 
-bbox_overlaps = cython_bbox.bbox_overlaps
+# bbox_overlaps = cython_bbox.bbox_overlaps
 
-# def bbox_overlaps(boxes, query_boxes):
+def bbox_overlaps_3D(boxes1, boxes2):
+    """Computes IoU overlaps between two sets of boxes.
+    boxes1, boxes2: [N, (y1, x1, y2, x2, z1, z2)].
+    """
+    # 1. Tile boxes2 and repeate boxes1. This allows us to compare
+    # every boxes1 against every boxes2 without loops.
+    # TF doesn't have an equivalent to np.repeate() so simulate it
+    # using tf.tile() and tf.reshape.
+    boxes1_repeat = boxes2.size()[0]
+    boxes2_repeat = boxes1.size()[0]
+    boxes1 = boxes1.repeat(1,boxes1_repeat).view(-1,6)
+    boxes2 = boxes2.repeat(boxes2_repeat,1)
+
+    # 2. Compute intersections
+    b1_x1, b1_y1, b1_z1, b1_x2, b1_y2, b1_z2 = boxes1.chunk(6, dim=1)
+    b2_x1, b2_y1, b2_z1, b2_x2, b2_y2, b2_z2 = boxes2.chunk(6, dim=1)
+    y1 = torch.max(b1_y1, b2_y1)[:, 0]
+    x1 = torch.max(b1_x1, b2_x1)[:, 0]
+    y2 = torch.min(b1_y2, b2_y2)[:, 0]
+    x2 = torch.min(b1_x2, b2_x2)[:, 0]
+    z1 = torch.max(b1_z1, b2_z1)[:, 0]
+    z2 = torch.min(b1_z2, b2_z2)[:, 0]
+    zeros = torch.zeros(y1.size()[0], requires_grad=False)
+    if y1.is_cuda:
+        zeros = zeros.cuda()
+    intersection = torch.max(x2 - x1 + 1, zeros) * torch.max(y2 - y1 + 1, zeros) * torch.max(z2 - z1 + 1, zeros)
+
+    # 3. Compute unions
+    b1_volume = (b1_y2 - b1_y1 + 1) * (b1_x2 - b1_x1 + 1)  * (b1_z2 - b1_z1 + 1)
+    b2_volume = (b2_y2 - b2_y1 + 1) * (b2_x2 - b2_x1 + 1)  * (b2_z2 - b2_z1 + 1)
+    union = b1_volume[:,0] + b2_volume[:,0] - intersection
+
+    # 4. Compute IoU and reshape to [boxes1, boxes2]
+    iou = intersection / union
+    overlaps = iou.view(boxes2_repeat, boxes1_repeat)
+    return overlaps
+
+def bbox_overlaps(boxes1, boxes2):
+    """Computes IoU overlaps between two sets of boxes.
+    boxes1, boxes2: [N, (y1, x1, y2, x2)]. / 3D: (z1, z2))
+    For better performance, pass the largest set first and the smaller second.
+    :return: (#boxes1, #boxes2), ious of each box of 1 machted with each of 2
+    """
     
-#     N = boxes.shape[0]
-#     K = query_boxes.shape[0]
-    
-#     overlaps = np.zeros((N, K))
-    
-#     for k in range(K):
-#         box_area = (
-#             (query_boxes[k, 3] - query_boxes[k, 0] + 1) *
-#             (query_boxes[k, 4] - query_boxes[k, 1] + 1) *
-#             (query_boxes[k, 5] - query_boxes[k, 2] + 1)
-#         )
-#         for n in range(N):
-#             iw = np.min([boxes[n, 3], query_boxes[k, 3]]) - np.max([boxes[n, 0], query_boxes[k, 0]]) + 1
-#             if iw > 0:
-#                 print("iw")
-#                 ih = np.min([boxes[n, 4], query_boxes[k, 4]]) - np.max([boxes[n, 1], query_boxes[k, 1]]) + 1
-#                 if ih > 0:
-#                     print("ih")
-#                     idd = np.min([boxes[n, 5], query_boxes[k, 5]]) - np.max([boxes[n, 2], query_boxes[k, 2]]) + 1
-#                     if idd > 0:
-#                         print("idd")
-#                         ua = float(
-#                             (boxes[n, 3] - boxes[n, 0] + 1) *
-#                             (boxes[n, 4] - boxes[n, 1] + 1) * 
-#                             (boxes[n, 5] - boxes[n, 2] + 1) +
-#                             box_area - iw * ih * idd
-#                         )
-#                         overlaps[n, k] = iw * ih * idd / ua
-#     return overlaps
+    # Areas of anchors and GT boxes
+    volume1 = (boxes1[:, 3] - boxes1[:, 0] + 1) * (boxes1[:, 4] - boxes1[:, 1] + 1) * (boxes1[:, 5] - boxes1[:, 2] + 1)
+    volume2 = (boxes2[:, 3] - boxes2[:, 0] + 1) * (boxes2[:, 4] - boxes2[:, 1] + 1) * (boxes2[:, 5] - boxes2[:, 2] + 1)
+    # Compute overlaps to generate matrix [boxes1 count, boxes2 count]
+    # Each cell contains the IoU value.
+    overlaps = np.zeros((boxes1.shape[0], boxes2.shape[0]))
+    for i in range(boxes2.shape[0]):
+        box2 = boxes2[i]  # this is the gt box
+        overlaps[:, i] = compute_iou_3D(box2, boxes1, volume2[i], volume1)
+    return overlaps
+
+def compute_iou_3D(box, boxes, box_volume, boxes_volume):
+    """Calculates IoU of the given box with the array of the given boxes.
+    box: 1D vector [y1, x1, y2, x2, z1, z2] (typically gt box)
+    boxes: [boxes_count, (y1, x1, y2, x2, z1, z2)]
+    box_area: float. the area of 'box'
+    boxes_area: array of length boxes_count.
+    Note: the areas are passed in rather than calculated here for
+          efficency. Calculate once in the caller to avoid duplicate work.
+    """
+    # Calculate intersection areas
+    y1 = np.maximum(box[1], boxes[:, 1])
+    y2 = np.minimum(box[4], boxes[:, 4])
+    x1 = np.maximum(box[0], boxes[:, 0])
+    x2 = np.minimum(box[3], boxes[:, 3])
+    z1 = np.maximum(box[2], boxes[:, 2])
+    z2 = np.minimum(box[5], boxes[:, 5])
+    intersection = np.maximum(x2 - x1 + 1, 0) * np.maximum(y2 - y1 + 1, 0) * np.maximum(z2 - z1 + 1, 0)
+    union = box_volume + boxes_volume[:] - intersection[:]
+    if union.any() == 0:
+        print("0 union!")
+        return 0
+    iou = intersection / union
+
+    return iou
 
 def boxes_area(boxes):
     """Compute the area of an array of boxes."""
@@ -187,6 +237,54 @@ def clip_tiled_boxes(boxes, im_shape):
     
     return boxes
 
+# def clip_tiled_boxes(boxes, window):
+#     """
+#     boxes: [N, 6] each col is y1, x1, y2, x2, z1, z2
+#     window: [6] in the form y1, x1, y2, x2, z1, z2
+#     """
+#     boxes = np.concatenate(
+#         (np.clip(boxes[:, 0], 0, window[0])[:, None],
+#          np.clip(boxes[:, 3], 0, window[0])[:, None],
+#          np.clip(boxes[:, 1], 0, window[1])[:, None],
+#          np.clip(boxes[:, 4], 0, window[1])[:, None],
+#          np.clip(boxes[:, 2], 0, window[2])[:, None],
+#          np.clip(boxes[:, 5], 0, window[2])[:, None]), 1
+#     )
+#     return boxes
+
+
+# def bbox_transform(boxes, deltas, weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)):
+#     """Applies the given deltas to the given boxes.
+#     boxes: [N, 6] where each row is y1, x1, y2, x2, z1, z2
+#     deltas: [N, 6] where each row is [dy, dx, dz, log(dh), log(dw), log(dd)]
+#     """
+#     # Convert to y, x, h, w
+#     boxes = torch.from_numpy(boxes)
+#     deltas = torch.from_numpy(deltas)
+#     height = boxes[:, 4] - boxes[:, 1]
+#     width = boxes[:, 3] - boxes[:, 0]
+#     depth = boxes[:, 5] - boxes[:, 2]
+#     center_y = boxes[:, 1] + 0.5 * height
+#     center_x = boxes[:, 0] + 0.5 * width
+#     center_z = boxes[:, 2] + 0.5 * depth
+#     # Apply deltas
+#     center_y += deltas[:, 1] * height
+#     center_x += deltas[:, 0] * width
+#     center_z += deltas[:, 2] * depth
+#     height *= torch.exp(deltas[:, 4])
+#     width *= torch.exp(deltas[:, 3])
+#     depth *= torch.exp(deltas[:, 5])
+#     # Convert back to y1, x1, y2, x2
+#     y1 = center_y - 0.5 * height
+#     x1 = center_x - 0.5 * width
+#     z1 = center_z - 0.5 * depth
+#     y2 = y1 + height
+#     x2 = x1 + width
+#     z2 = z1 + depth
+#     result = torch.stack([x1, y1, z1, x2, y2, z2], dim=1)
+#     result = result.cpu().numpy()
+#     return result
+
 
 def bbox_transform(boxes, deltas, weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)):
     """Forward transform that maps proposal boxes to predicted ground-truth
@@ -198,9 +296,9 @@ def bbox_transform(boxes, deltas, weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)):
 
     boxes = boxes.astype(deltas.dtype, copy=False)
 
-    widths = boxes[:, 2] - boxes[:, 0] + 1.0
-    heights = boxes[:, 3] - boxes[:, 1] + 1.0
-    depths = boxes[:, 4] - boxes[:, 2] + 1.0
+    widths = boxes[:, 3] - boxes[:, 0] + 1.0
+    heights = boxes[:, 4] - boxes[:, 1] + 1.0
+    depths = boxes[:, 5] - boxes[:, 2] + 1.0
     ctr_x = boxes[:, 0] + 0.5 * widths
     ctr_y = boxes[:, 1] + 0.5 * heights
     ctr_z = boxes[:, 2] + 0.5 * depths
@@ -242,7 +340,7 @@ def bbox_transform(boxes, deltas, weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)):
     return pred_boxes
 
 
-def bbox_transform_inv(boxes, gt_boxes, weights=(1.0, 1.0, 1.0, 1.0)):
+def bbox_transform_inv(boxes, gt_boxes, weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)):
     """Inverse transform that computes target bounding-box regression deltas
     given proposal boxes and ground-truth boxes. The weights argument should be
     a 4-tuple of multiplicative weights that are applied to the regression
@@ -255,16 +353,16 @@ def bbox_transform_inv(boxes, gt_boxes, weights=(1.0, 1.0, 1.0, 1.0)):
     approximately the weights one would get from COCO using the previous unit
     stdev heuristic.
     """
-    ex_widths = boxes[:, 3] - boxes[:, 0] + 1.0
-    ex_heights = boxes[:, 4] - boxes[:, 1] + 1.0
-    ex_depths = boxes[:, 5] - boxes[:, 2] + 1.0
+    ex_widths = boxes[:, 3] - boxes[:, 0] + 1.
+    ex_heights = boxes[:, 4] - boxes[:, 1] + 1.
+    ex_depths = boxes[:, 5] - boxes[:, 2] + 1.
     ex_ctr_x = boxes[:, 0] + 0.5 * ex_widths
     ex_ctr_y = boxes[:, 1] + 0.5 * ex_heights
     ex_ctr_z = boxes[:, 2] + 0.5 * ex_depths
 
-    gt_widths = gt_boxes[:, 3] - gt_boxes[:, 0] + 1.0
-    gt_heights = gt_boxes[:, 4] - gt_boxes[:, 1] + 1.0
-    gt_depths = gt_boxes[:, 5] - gt_boxes[:, 2] + 1.0
+    gt_widths = gt_boxes[:, 3] - gt_boxes[:, 0] + 1.
+    gt_heights = gt_boxes[:, 4] - gt_boxes[:, 1] + 1.
+    gt_depths = gt_boxes[:, 5] - gt_boxes[:, 2] + 1.
     gt_ctr_x = gt_boxes[:, 0] + 0.5 * gt_widths
     gt_ctr_y = gt_boxes[:, 1] + 0.5 * gt_heights
     gt_ctr_z = gt_boxes[:, 2] + 0.5 * gt_depths
@@ -281,22 +379,59 @@ def bbox_transform_inv(boxes, gt_boxes, weights=(1.0, 1.0, 1.0, 1.0)):
                          targets_dh, targets_dd)).transpose()
     return targets
 
+# def bbox_transform_inv(box, gt_box, weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)):
+#     """Compute refinement needed to transform box to gt_box.
+#     box and gt_box are [N, (y1, x1, y2, x2)] / 3D: (z1, z2))
+#     """
+#     box = torch.from_numpy(box)
+#     gt_box = torch.from_numpy(gt_box)
+#     height = box[:, 4] - box[:, 1] + 1
+#     width = box[:, 3] - box[:, 0] + 1
+#     center_y = box[:, 1] + 0.5 * height
+#     center_x = box[:, 0] + 0.5 * width
+
+#     gt_height = gt_box[:, 4] - gt_box[:, 1] + 1
+#     gt_width = gt_box[:, 3] - gt_box[:, 0] + 1
+#     gt_center_y = gt_box[:, 1] + 0.5 * gt_height
+#     gt_center_x = gt_box[:, 0] + 0.5 * gt_width
+
+#     dy = (gt_center_y - center_y) / height
+#     dx = (gt_center_x - center_x) / width
+#     dh = torch.log(gt_height / height)
+#     dw = torch.log(gt_width / width)
+    
+#     depth = box[:, 5] - box[:, 2] + 1
+#     center_z = box[:, 2] + 0.5 * depth
+#     gt_depth = gt_box[:, 5] - gt_box[:, 2] + 1
+#     gt_center_z = gt_box[:, 2] + 0.5 * gt_depth
+#     dz = (gt_center_z - center_z) / depth
+#     dd = torch.log(gt_depth / depth)
+#     result = torch.stack([dx, dy, dz, dw, dh, dd], dim=1)
+    
+#     result = result.cpu().numpy()
+#     return result
+
 
 def expand_boxes(boxes, scale):
     """Expand an array of boxes by a given scale."""
-    w_half = (boxes[:, 2] - boxes[:, 0]) * .5
-    h_half = (boxes[:, 3] - boxes[:, 1]) * .5
-    x_c = (boxes[:, 2] + boxes[:, 0]) * .5
-    y_c = (boxes[:, 3] + boxes[:, 1]) * .5
+    w_half = (boxes[:, 3] - boxes[:, 0]) * .5
+    h_half = (boxes[:, 4] - boxes[:, 1]) * .5
+    d_half = (boxes[:, 5] - boxes[:, 2]) * .5
+    x_c = (boxes[:, 3] + boxes[:, 0]) * .5
+    y_c = (boxes[:, 4] + boxes[:, 1]) * .5
+    z_c = (boxes[:, 5] + boxes[:, 2]) * .5
 
     w_half *= scale
     h_half *= scale
+    d_half *= scale
 
     boxes_exp = np.zeros(boxes.shape)
     boxes_exp[:, 0] = x_c - w_half
-    boxes_exp[:, 2] = x_c + w_half
+    boxes_exp[:, 3] = x_c + w_half
     boxes_exp[:, 1] = y_c - h_half
-    boxes_exp[:, 3] = y_c + h_half
+    boxes_exp[:, 4] = y_c + h_half
+    boxes_exp[:, 2] = z_c - d_half
+    boxes_exp[:, 5] = z_c + d_half
 
     return boxes_exp
 
@@ -367,12 +502,66 @@ def box_voting(top_dets, all_dets, thresh, scoring_method='ID', beta=1.0):
 
     return top_dets_out
 
+def nms(boxes, scores, iou_threshold):
+    scores = scores.reshape((scores.shape[0]))
+    return c_nms.nms(torch.from_numpy(boxes).cuda(), torch.from_numpy(scores).cuda(), iou_threshold)
 
-def nms(dets, thresh):
-    """Apply classic DPM-style greedy NMS."""
-    if dets.shape[0] == 0:
-        return []
-    return cython_nms.nms(dets, thresh)
+# def nms(dets, thresh):
+#     """Apply classic DPM-style greedy NMS."""
+#     if dets.shape[0] == 0:
+#         return []
+#     return cython_nms.nms(dets, thresh)
+
+# def nms(box_coords, scores, thresh):
+#     """ non-maximum suppression on 2D or 3D boxes in numpy.
+#     :param box_coords: [y1,x1,y2,x2 (,z1,z2)] with y1<=y2, x1<=x2, z1<=z2.
+#     :param scores: ranking scores (higher score == higher rank) of boxes.
+#     :param thresh: IoU threshold for clustering.
+#     :return:
+#     """
+#     y1 = box_coords[:, 1]
+#     x1 = box_coords[:, 0]
+#     y2 = box_coords[:, 4]
+#     x2 = box_coords[:, 3]
+#     assert np.all(y1 <= y2) and np.all(x1 <= x2), """"the definition of the coordinates is crucially important here: 
+#             coordinates of which maxima are taken need to be the lower coordinates"""
+#     areas = (x2 - x1) * (y2 - y1)
+
+#     is_3d = box_coords.shape[1] == 6
+#     if is_3d: # 3-dim case
+#         z1 = box_coords[:, 2]
+#         z2 = box_coords[:, 5]
+#         assert np.all(z1<=z2), """"the definition of the coordinates is crucially important here: 
+#            coordinates of which maxima are taken need to be the lower coordinates"""
+#         areas *= (z2 - z1)
+
+#     order = scores.argsort(axis=0)[::-1]
+
+#     keep = []
+#     while order.size > 0:  # order is the sorted index.  maps order to index: order[1] = 24 means (rank1, ix 24)
+#         i = order[0] # highest scoring element
+#         yy1 = np.maximum(y1[i], y1[order])  # highest scoring element still in >order<, is compared to itself, that is okay.
+#         xx1 = np.maximum(x1[i], x1[order])
+#         yy2 = np.minimum(y2[i], y2[order])
+#         xx2 = np.minimum(x2[i], x2[order])
+
+#         h = np.maximum(0.0, yy2 - yy1)
+#         w = np.maximum(0.0, xx2 - xx1)
+#         inter = h * w
+
+#         if is_3d:
+#             zz1 = np.maximum(z1[i], z1[order])
+#             zz2 = np.minimum(z2[i], z2[order])
+#             d = np.maximum(0.0, zz2 - zz1)
+#             inter *= d
+
+#         iou = inter / (areas[i] + areas[order] - inter)
+
+#         non_matches = np.nonzero(iou <= thresh)[0]  # get all elements that were not matched and discard all others.
+#         order = order[non_matches]
+#         keep.append(i)
+
+#     return keep
 
 
 def soft_nms(

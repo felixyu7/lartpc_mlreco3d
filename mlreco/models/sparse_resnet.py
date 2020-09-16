@@ -4,9 +4,29 @@ import time
 import sparseconvnet as scn
 from collections import OrderedDict
 
-def coords_padding(coords, val):
-    coords[:, :3] += val
-    return coords
+def coords_padding(coords, features, val):
+    features = torch.cat((features, torch.zeros((33,1)).cuda()))
+    
+    features_channel = torch.cat((features, features, features), dim=1)
+    
+    padding = torch.full((33, 3), 1023, dtype=torch.float32)
+    for i in range(len(padding)):
+        padding[i] += i
+        
+    padding = torch.cat((padding, torch.zeros((33, 1))), dim=1)
+    
+    coords = torch.cat((coords, padding.cuda()))
+    
+    return coords, features_channel
+
+# def coords_padding(coords, features, val):
+    
+#     features_channel = torch.cat((features, features, features), dim=1)
+    
+#     coords[:, :3] += val
+    
+#     return coords, features_channel
+    
 
 class SparseResNet(nn.Module):
     
@@ -47,6 +67,8 @@ class SparseResNet(nn.Module):
         
         self.desparsify = scn.SparseToDense(self.dimension, self.dim_out)
         self.sparsifier = scn.InputLayer(self.dimension, self.dim_out + self.pad, mode=3)
+#         self.sparsifier = scn.DenseToSparse(self.dimension)
+        self.padder = nn.ConstantPad3d((0,11,0,11,0,11), 0)
         
         if self.pool_mode == 'max':
             self.pool = scn.MaxPooling(self.dimension, self.final_tensor_shape, self.final_tensor_shape)
@@ -63,7 +85,11 @@ class SparseResNet(nn.Module):
         features = features[:, -1].view(-1, 1)
         batch_size = coords[:, 3].unique().shape[0]
         
-        coords = coords_padding(coords, self.pad)
+#         coords = coords[torch.where(features > 0.1)[0], :]
+#         features = features[torch.where(features > 0.1)[0], :]
+        
+        coords, features = coords_padding(coords, features, self.pad)
+        features = features * 100
         
         x = self.sparsifier((coords, features))
 
@@ -71,6 +97,7 @@ class SparseResNet(nn.Module):
         out = self.res2(out)
         out = self.res3(out)
         out = self.res4(out)
+        
 
 #         out = self.pool(out)
         out = self.desparsify(out)
@@ -160,7 +187,6 @@ class SparseAffineChannel3d(nn.Module):
         self.bias.data.zero_()
 
     def forward(self, x): #use torch.multiply()
-    
         x.features = x.features * self.weight.view(1, self.num_features) + self.bias.view(1, self.num_features)
         return x
     
@@ -176,54 +202,121 @@ class ResNet_roi_conv5_head(nn.Module):
         
         self.dim_out = 2048
         
-        self.sparsify = scn.DenseToSparse(self.dimension)
+#         self.sparsify = scn.DenseToSparse(self.dimension)
         
-        self.res5 = scn.Sequential(sparse_bottleneck(self.dimension, 1024, 2048, dim_in, downsample=basic_bn_shortcut(self.dimension, 1024, 2048, 1)),
-            sparse_bottleneck(self.dimension, 2048, 2048, dim_in),
-            sparse_bottleneck(self.dimension, 2048, 2048, dim_in))
+#         self.res5 = scn.Sequential(sparse_bottleneck(self.dimension, 1024, 2048, dim_in, downsample=basic_bn_shortcut(self.dimension, 1024, 2048, 2)),
+#             sparse_bottleneck(self.dimension, 2048, 2048, dim_in),
+#             sparse_bottleneck(self.dimension, 2048, 2048, dim_in))
+
+        self.res5 = scn.Sequential(bottleneck_transformation(1024, self.dim_out, dim_in, stride=2, downsample=basic_bn_shortcut_dense(1024, self.dim_out, 2)),
+            bottleneck_transformation(self.dim_out, self.dim_out, dim_in),
+            bottleneck_transformation(self.dim_out, self.dim_out, dim_in))
         
-        self.desparsify = scn.SparseToDense(self.dimension, 2048)
+#         self.desparsify = scn.SparseToDense(self.dimension, self.dim_out)
         
-        self.avgpool = nn.AvgPool3d(7)
+        self.avgpool = nn.AvgPool3d((6,6,6))
         self.validation = validation
 
         self._init_modules()
 
     def _init_modules(self):
         # Freeze all bn (affine) layers !!!
-        self.apply(lambda m: freeze_params(m) if isinstance(m, SparseAffineChannel3d) else None)
+        self.apply(lambda m: freeze_params(m) if isinstance(m, AffineChannel3d) else None)
 
     def forward(self, x, rpn_ret):
-
+    
         x = self.roi_xform(
             x, 
             rpn_ret,
             blob_rois='rois',
             method='RoIAlign',
-            resolution=14,
+            resolution=12,
             spatial_scale=self.spatial_scale,
-            sampling_ratio=0
+            sampling_ratio=-1
         )
-        # print('x in RESNET.PY', x.shape)
         
-#         import pdb; pdb.set_trace()
-
-        print(x.shape)
-        
-        sparse_x = self.sparsify(x.contiguous())
-        
-        res5_feat = self.res5(sparse_x)
-        
-        res5_feat = self.desparsify(res5_feat)
-        
-        # print('res5_feat in RESNET.PY', res5_feat.shape)
+        res5_feat = self.res5(x)
         
         x = self.avgpool(res5_feat)
+
         if ( self.training or self.validation ):
             return x, res5_feat
         else:
             return x
 
+class bottleneck_transformation(nn.Module):
+    """ Bottleneck Residual Block """
+
+    def __init__(self, inplanes, outplanes, innerplanes, stride=1, dilation=1, group=1,
+                 downsample=None):
+        super(bottleneck_transformation,self).__init__()
+        # In original resnet, stride=2 is on 1x1.
+        # In fb.torch resnet, stride=2 is on 3x3.
+        (str1x1, str3x3) = (stride, 1)
+        self.stride = stride
+
+        self.conv1 = nn.Conv3d(
+            inplanes, innerplanes, kernel_size=1, stride=str1x1, bias=False)
+        self.bn1 = AffineChannel3d(innerplanes)
+
+        self.conv2 = nn.Conv3d(
+            innerplanes, innerplanes, kernel_size=3, stride=str3x3, bias=False,
+            padding=1 * dilation, dilation=dilation, groups=group)
+        self.bn2 = AffineChannel3d(innerplanes)
+
+        self.conv3 = nn.Conv3d(
+            innerplanes, outplanes, kernel_size=1, stride=1, bias=False)
+        self.bn3 = AffineChannel3d(outplanes)
+
+        self.downsample = downsample
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        residual = x
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if self.downsample is not None:
+            residual = self.downsample(x)
+
+        out += residual
+        out = self.relu(out)
+
+        return out        
+
+class AffineChannel3d(nn.Module):
+    """ A simple channel-wise affine transformation operation """
+    def __init__(self, num_features):
+        super(AffineChannel3d,self).__init__()
+        self.num_features = num_features
+        self.weight = nn.Parameter(torch.Tensor(num_features))
+        self.bias = nn.Parameter(torch.Tensor(num_features))
+        self.weight.data.uniform_()
+        self.bias.data.zero_()
+
+    def forward(self, x):
+        return x * self.weight.view(1, self.num_features, 1, 1, 1) + \
+            self.bias.view(1, self.num_features, 1, 1, 1)
+    
+    
+def basic_bn_shortcut_dense(inplanes, outplanes, stride):
+    return nn.Sequential(
+        nn.Conv3d(inplanes,
+                  outplanes,
+                  kernel_size=1,
+                  stride=stride,
+                  bias=False),
+        AffineChannel3d(outplanes),
+    )
+    
 def freeze_params(m):
     """Freeze all the weights by setting requires_grad to False
     """

@@ -26,7 +26,7 @@ import numpy as np
 import numpy.random as npr
 
 # import roi_data.keypoint_rcnn
-# import roi_data.mask_rcnn
+import mlreco.models.mask_rcnn_blobs as mask_rcnn
 import mlreco.models.utils.boxes as box_utils
 import mlreco.models.utils.blob as blob_utils
 # import utils.fpn as fpn_utils
@@ -163,10 +163,8 @@ def _sample_rois(roidb, im_scale, batch_idx):
         bbox_inside_weights=bbox_inside_weights,
         bbox_outside_weights=bbox_outside_weights)
 
-    # Optionally add Mask R-CNN blobs
-#     if cfg.MODEL.MASK_ON:
-#         roi_data.mask_rcnn.add_mask_rcnn_blobs(blob_dict, sampled_boxes, roidb,
-#                                                im_scale, batch_idx)
+    # Mask RCNN blobs
+#     mask_rcnn.add_mask_rcnn_blobs(blob_dict, sampled_boxes, roidb, im_scale, batch_idx)
 
     return blob_dict
 

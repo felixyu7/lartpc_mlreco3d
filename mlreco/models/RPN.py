@@ -9,6 +9,7 @@ import mlreco.models.utils.boxes as box_utils
 import mlreco.models.utils.net as net_utils
 import mlreco.models.utils.blob as blob_utils
 import mlreco.models.fast_rcnn as fast_rcnn
+from mlreco.models.nms import nms
 import scipy
 
 import threading
@@ -26,16 +27,19 @@ FieldOfAnchors = namedtuple(
 
 class RPN(nn.Module):
 
-    def __init__(self, cfg, name="RPN"):
+    def __init__(self, cfg, name="rpn"):
         super(RPN,self).__init__()
+        self.model_config = cfg[name]
         self.validation = False
         self.dim_in = 1024
         self.dim_out = 1024
         self.spatial_scale = 1/16
         anchors = generate_anchors(
             stride=1. / self.spatial_scale,
-            sizes=(32, 64, 128, 256, 512),
-            aspect_ratios=([0.5, 1], [1, 0.5], [1, 1], [1, 2], [2, 1]))
+            scales_xy=((32, 64, 128, 256, 512)),
+            scales_z=(32, 64, 128, 256, 512),
+            aspect_ratios=(0.5, 1, 2))
+#         anchors = generate_anchors_3D((32, 64, 128, 256, 512), (32, 64, 128, 256, 512), (0.5,1,2), (65, 65, 65), 16, 16, 16)
         num_anchors = anchors.shape[0]
 
         # RPN hidden representation
@@ -46,9 +50,8 @@ class RPN(nn.Module):
         # Proposal bbox regression deltas
         self.RPN_bbox_pred = nn.Conv3d(self.dim_out, num_anchors * 6, 1, 1, 0)
 
-        self.RPN_GenerateProposals = GenerateProposalsOp(anchors, self.spatial_scale, self.validation)
+        self.RPN_GenerateProposals = GenerateProposalsOp(self.model_config, anchors, self.spatial_scale, self.validation)
         self.RPN_GenerateProposalLabels = GenerateProposalLabelsOp()
-
 
         self._init_weights()
 
@@ -92,17 +95,17 @@ class RPN(nn.Module):
         return_dict['rpn_roi_probs'] = rpn_rois_prob
 
         if self.training or self.validation:
-            # Add op that generates training labels for in-network RPN proposals
+#             Add op that generates training labels for in-network RPN proposals
             blobs_out = self.RPN_GenerateProposalLabels(rpn_rois, roidb, im_info)
             return_dict.update(blobs_out)
-        else:
+        if not self.training:
             # Alias rois to rpn_rois for inference
             return_dict['rois'] = return_dict['rpn_rois']
         return return_dict
 
 
 def generate_anchors(
-    stride=16, sizes=(32, 64, 128, 256, 512), aspect_ratios=(0.5, 1, 2)
+    stride=16, scales_xy=(32, 64, 128, 256, 512), scales_z=(8, 16, 32, 64, 128), aspect_ratios=(0.5, 1, 2)
 ):
     """Generates a matrix of anchor boxes in (x1, y1, x2, y2) format. Anchors
     are centered on stride / 2, have (approximate) sqrt areas of the specified
@@ -110,20 +113,21 @@ def generate_anchors(
     """
     return _generate_anchors(
         stride,
-        np.array(sizes, dtype=np.float) / stride,
+        np.array(scales_xy, dtype=np.float) / stride,
+        np.array(scales_z, dtype=np.float) / stride,
         np.array(aspect_ratios, dtype=np.float)
     )
 
 
-def _generate_anchors(base_size, scales, aspect_ratios):
+def _generate_anchors(base_size, scales_xy, scales_z, aspect_ratios):
     """Generate anchor (reference) windows by enumerating aspect ratios X
     scales wrt a reference (0, 0, base_size - 1, base_size - 1) window.
     """
     anchor = np.array([1, 1, 1, base_size, base_size, base_size], dtype=np.float) - 1
-    anchors = _ratio_enum(anchor, aspect_ratios)
-    anchors = np.vstack(
-        [_scale_enum(anchors[i, :], scales) for i in range(anchors.shape[0])]
-    )
+    anchors = _ratio_enum(anchor, scales_xy, scales_z, aspect_ratios)
+#     anchors = np.vstack(
+#         [_scale_enum(anchors[i, :], scales) for i in range(anchors.shape[0])]
+#     )
     return anchors
 
 
@@ -158,34 +162,40 @@ def _mkanchors(ws, hs, ds, x_ctr, y_ctr, z_ctr):
     return anchors
 
 
-def _ratio_enum(anchor, ratios):
+def _ratio_enum(anchor, scales_xy, scales_z, ratios):
     """Enumerate a set of anchors for each aspect ratio wrt an anchor."""
     # w, h, x_ctr, y_ctr = _whctrs(anchor)
     w, h, d, x_ctr, y_ctr, z_ctr = _whctrs(anchor)
-    # size = w * h
     size = w * h * d
-    size_ratios = size / (ratios[:,0] * ratios[:,1])
-    ws = np.round(np.cbrt(size_ratios))
-    hs = np.round(ws * (ratios[:,0]))
-    ds = np.round(ws * (ratios[:,1]))
-    # anchors = _mkanchors(ws, hs, x_ctr, y_ctr)
+#     size_xy = w * h
+#     size_ratios_xy = size_xy / ratios
+    
+#     size_ratios_z = d / [2, 1, 0.5]
+            
+    scales_xy, ratios_meshed = np.meshgrid(np.array(scales_xy), np.array(ratios))
+#     scales_xy, scales_z, ratios_meshed = np.meshgrid(np.array(scales_xy), np.array(scales_z), np.array(ratios))
+#     scales_z = scales_z.flatten()
+
+    scales_xy = scales_xy.flatten()
+    ratios_meshed = ratios_meshed.flatten()
+
+#     Enumerate heights and widths from scales and ratios
+    hs = h * (scales_xy / np.sqrt(ratios_meshed))
+    ws = w * (scales_xy * np.sqrt(ratios_meshed))
+    ds = d * (np.tile(np.array(scales_z), len(ratios_meshed) // np.array(scales_z)[..., None].shape[0]))
+#     ds = d * (scales_z * np.sqrt(ratios_meshed))
+
+#     ws = np.round(np.cbrt(size_ratios))
+#     hs = np.round(ws * (ratios[:,0]))
+#     ds = np.round(ws * (ratios[:,1]))
+#     anchors = _mkanchors(ws, hs, x_ctr, y_ctr)
     anchors = _mkanchors(ws, hs, ds, x_ctr, y_ctr, z_ctr)
     return anchors
-
-
-def _scale_enum(anchor, scales):
-    """Enumerate a set of anchors for each scale wrt an anchor."""
-    w, h, d, x_ctr, y_ctr, z_ctr = _whctrs(anchor)
-    ws = w * scales
-    hs = h * scales
-    ds = d * scales
-    anchors = _mkanchors(ws, hs, ds, x_ctr, y_ctr, z_ctr)
-    return anchors
-
 
 class GenerateProposalsOp(nn.Module):
-    def __init__(self, anchors, spatial_scale, validation=False):
+    def __init__(self, cfg, anchors, spatial_scale, validation=False):
         super(GenerateProposalsOp,self).__init__()
+        self.model_config = cfg
         self._anchors = anchors
         self._num_anchors = self._anchors.shape[0]
         self._feat_stride = 1. / spatial_scale
@@ -259,8 +269,24 @@ class GenerateProposalsOp(nn.Module):
         K = shifts.shape[0]
         all_anchors = self._anchors[np.newaxis, :, :] + shifts[:, np.newaxis, :]
         all_anchors = all_anchors.reshape((K * A, 6))
-        # all_anchors = torch.from_numpy(all_anchors).type_as(scores)
-
+#         all_anchors = torch.from_numpy(all_anchors).type_as(scores)
+        
+#         box_widths, box_centers_x = np.meshgrid(self._anchors[:,3] - self._anchors[:,0], shift_x)
+#         box_heights, box_centers_y = np.meshgrid(self._anchors[:,4] - self._anchors[:,1], shift_y)
+#         box_depths, box_centers_z = np.meshgrid(self._anchors[:,5] - self._anchors[:,2], shift_z)
+        
+#         # Reshape to get a list of (y, x, z) and a list of (h, w, d)
+#         box_centers = np.stack(
+#             [box_centers_y, box_centers_x, box_centers_z], axis=2).reshape([-1, 3])
+#         box_sizes = np.stack([box_heights, box_widths, box_depths], axis=2).reshape([-1, 3])
+        
+#         # Convert to corner coordinates (y1, x1, y2, x2, z1, z2)
+#         boxes = np.concatenate([box_centers - 0.5 * box_sizes,
+#                                 box_centers + 0.5 * box_sizes], axis=1)
+        
+# #         i = [1, 0, 4, 3, 2, 5]
+#         all_anchors = np.transpose(np.array([boxes[:, 1], boxes[:, 0], boxes[:, 2], boxes[:, 4], boxes[:, 3], boxes[:, 5]]), axes=(1, 0))
+        
         rois = np.empty((0, 7), dtype=np.float32)
         roi_probs = np.empty((0, 1), dtype=np.float32)
         for im_i in range(num_images):
@@ -282,10 +308,10 @@ class GenerateProposalsOp(nn.Module):
 #         post_nms_topN = cfg[cfg_key].RPN_POST_NMS_TOP_N
 #         nms_thresh = cfg[cfg_key].RPN_NMS_THRESH
 #         min_size = cfg[cfg_key].RPN_MIN_SIZE
-        pre_nms_topN = 6000
-        post_nms_topN = 1000
-        nms_thresh = 0.7
-        min_size = 0
+        pre_nms_topN = self.model_config.get('pre_nms_topN', 192000)
+        post_nms_topN = self.model_config.get('post_nms_topN', 32000)
+        nms_thresh = self.model_config.get('nms_thresh', 0.7)
+        min_size = 1
         # print('generate_proposals:', pre_nms_topN, post_nms_topN, nms_thresh, min_size)
 
         # Transpose and reshape predicted bbox transformations to get them
@@ -336,13 +362,17 @@ class GenerateProposalsOp(nn.Module):
         # 7. take after_nms_topN (e.g. 300)
         # 8. return the top proposals (-> RoIs top)
         if nms_thresh > 0:
-            keep = box_utils.nms(np.hstack((proposals, scores)), nms_thresh)
+#             keep = nms.nms(torch.from_numpy(proposals).cuda(), torch.from_numpy(scores).cuda(), nms_thresh)
+            keep = box_utils.nms(proposals, scores, nms_thresh)
+            keep = keep.cpu().numpy()
+            keep = np.array(keep).flatten().astype(np.int32)
             # print('nms keep:', keep.shape)
             if post_nms_topN > 0:
                 keep = keep[:post_nms_topN]
 
             proposals = proposals[keep, :]
             scores = scores[keep]
+        
         return proposals, scores
 
 
@@ -444,10 +474,11 @@ def _merge_proposal_boxes_into_roidb(roidb, box_list):
         if len(gt_inds) > 0:
             gt_boxes = entry['boxes'][gt_inds, :]
             gt_classes = entry['gt_classes'][gt_inds]
-            proposal_to_gt_overlaps = box_utils.bbox_overlaps(
-                boxes.astype(dtype=np.float32, copy=False),
-                gt_boxes.astype(dtype=np.float32, copy=False)
+            proposal_to_gt_overlaps = box_utils.bbox_overlaps_3D(
+                torch.from_numpy(boxes).float(),
+                torch.from_numpy(gt_boxes).float()
             )
+            proposal_to_gt_overlaps = proposal_to_gt_overlaps.numpy().astype(np.float32)
             # Gt box that overlaps each input box the most
             # (ties are broken arbitrarily by class order)
             argmaxes = proposal_to_gt_overlaps.argmax(axis=1)
@@ -456,6 +487,7 @@ def _merge_proposal_boxes_into_roidb(roidb, box_list):
             # Those boxes with non-zero overlap with gt boxes
             I = np.where(maxes > 0)[0]
             # Record max overlaps with the class of the appropriate gt box
+            
             gt_overlaps[I, gt_classes[argmaxes[I]]] = maxes[I]
             box_to_gt_ind_map[I] = gt_inds[argmaxes[I]]
         # print("entry['boxes'].shape",entry['boxes'].shape)
@@ -526,8 +558,7 @@ def add_rpn_blobs(blobs, im_scales, roidb):
 
 #     foa = data_utils.get_field_of_anchors(cfg.RPN.STRIDE, cfg.RPN.SIZES,
 #                                           cfg.RPN.ASPECT_RATIOS)
-    foa = get_field_of_anchors(16, (32, 64, 128, 256, 512),
-                                          ([0.5, 1], [1, 0.5], [1, 1], [1, 2], [2, 1]))
+    foa = get_field_of_anchors(16, (32, 64, 128, 256, 512), (32, 64, 128, 256, 512), (0.5, 1, 2))
 
     all_anchors = foa.field_of_anchors
 
@@ -582,25 +613,25 @@ def add_rpn_blobs(blobs, im_scales, roidb):
 def _get_rpn_blobs(im_height, im_width, im_depth, foas, all_anchors, gt_boxes):
     total_anchors = all_anchors.shape[0]
 #     straddle_thresh = cfg.TRAIN.RPN_STRADDLE_THRESH
-    straddle_thresh = 0
+#     straddle_thresh = 0
 
-    if straddle_thresh >= 0:
-        # Only keep anchors inside the image by a margin of straddle_thresh
-        # Set TRAIN.RPN_STRADDLE_THRESH to -1 (or a large value) to keep all
-        # anchors
-        inds_inside = np.where(
-            (all_anchors[:, 0] >= -straddle_thresh) &
-            (all_anchors[:, 1] >= -straddle_thresh) &
-            (all_anchors[:, 2] >= -straddle_thresh) &
-            (all_anchors[:, 3] < im_width + straddle_thresh) &
-            (all_anchors[:, 4] < im_height + straddle_thresh) &
-            (all_anchors[:, 5] < im_depth + straddle_thresh)
-        )[0]
-        # keep only inside anchors
-        anchors = all_anchors[inds_inside, :]
-    else:
-        inds_inside = np.arange(all_anchors.shape[0])
-        anchors = all_anchors
+#     if straddle_thresh >= 0:
+#         # Only keep anchors inside the image by a margin of straddle_thresh
+#         # Set TRAIN.RPN_STRADDLE_THRESH to -1 (or a large value) to keep all
+#         # anchors
+#         inds_inside = np.where(
+#             (all_anchors[:, 0] >= -straddle_thresh) &
+#             (all_anchors[:, 1] >= -straddle_thresh) &
+#             (all_anchors[:, 2] >= -straddle_thresh) &
+#             (all_anchors[:, 3] < im_width + straddle_thresh) &
+#             (all_anchors[:, 4] < im_height + straddle_thresh) &
+#             (all_anchors[:, 5] < im_depth + straddle_thresh)
+#         )[0]
+#         # keep only inside anchors
+#         anchors = all_anchors[inds_inside, :]
+#     else:
+    inds_inside = np.arange(all_anchors.shape[0])
+    anchors = all_anchors
     num_inside = len(inds_inside)
 
 #     logger.debug('total_anchors: %d', total_anchors)
@@ -638,7 +669,8 @@ def _get_rpn_blobs(im_height, im_width, im_depth, foas, all_anchors, gt_boxes):
         labels[anchors_with_max_overlap] = 1
         # Fg label: above threshold IOU
 #         labels[anchor_to_gt_max >= cfg.TRAIN.RPN_POSITIVE_OVERLAP] = 1
-        labels[anchor_to_gt_max >= 0.7] = 1
+#         labels[anchor_to_gt_max >= 0.7] = 1
+        labels[anchor_to_gt_max >= 0.5] = 1
 
     # subsample positive labels if we have too many
 #     num_fg = int(cfg.TRAIN.RPN_FG_FRACTION * cfg.TRAIN.RPN_BATCH_SIZE_PER_IM)
@@ -735,7 +767,8 @@ def _get_rpn_blobs(im_height, im_width, im_depth, foas, all_anchors, gt_boxes):
 
 def compute_targets(ex_rois, gt_rois, weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)):
     """Compute bounding-box regression targets for an image."""
-    return box_utils.bbox_transform_inv(ex_rois, gt_rois, weights).astype(
+    print(box_utils.bbox_transform_inv(ex_rois, gt_rois).sum())
+    return box_utils.bbox_transform_inv(ex_rois, gt_rois).astype(
         np.float32, copy=False
     )
 
@@ -753,23 +786,25 @@ def unmap(data, count, inds, fill=0):
         ret = np.empty((count, ) + data.shape[1:], dtype=data.dtype)
         ret.fill(fill)
         ret[inds, :] = data
+        
     return ret
 
 def get_field_of_anchors(
-    stride, anchor_sizes, anchor_aspect_ratios, octave=None, aspect=None
+    stride, anchor_sizes, anchor_sizes_z, anchor_aspect_ratios, octave=None, aspect=None
 ):
     global _threadlocal_foa
     if not hasattr(_threadlocal_foa, 'cache'):
         _threadlocal_foa.cache = {}
 
-    cache_key = str(stride) + str(anchor_sizes) + str(anchor_aspect_ratios)
+    cache_key = str(stride) + str(anchor_sizes) + str(anchor_sizes_z) + str(anchor_aspect_ratios)
     if cache_key in _threadlocal_foa.cache:
         return _threadlocal_foa.cache[cache_key]
 
     # Anchors at a single feature cell
     cell_anchors = generate_anchors(
-        stride=stride, sizes=anchor_sizes, aspect_ratios=anchor_aspect_ratios
+        stride=stride, scales_xy=anchor_sizes, scales_z=anchor_sizes_z, aspect_ratios=anchor_aspect_ratios
     )
+    
     num_cell_anchors = cell_anchors.shape[0]
 
     # Generate canonical proposals from shifted anchors
@@ -781,12 +816,19 @@ def get_field_of_anchors(
         1024 / float(32)
     )
     field_size = int(np.ceil((fpn_max_size + 11) / float(stride)))
-    shifts = np.arange(0, field_size) * stride
-    shift_x, shift_y, shift_z = np.meshgrid(shifts, shifts, shifts)
-    shift_x = shift_x.ravel()
-    shift_y = shift_y.ravel()
-    shift_z = shift_z.ravel()
-    shifts = np.vstack((shift_x, shift_y, shift_z, shift_x, shift_y, shift_z)).transpose()
+#     shifts = np.arange(0, field_size) * stride
+#     shift_x, shift_y, shift_z = np.meshgrid(shifts, shifts, shifts)
+    shifts_x = np.arange(0, field_size, 1) * stride #translate from fm positions to input coords.
+    shifts_y = np.arange(0, field_size, 1) * stride
+    shifts_z = np.arange(0, field_size, 1) * stride
+    shifts_x, shifts_y, shifts_z = np.meshgrid(shifts_x, shifts_y, shifts_z)
+    
+#     import pdb; pdb.set_trace()
+    
+#     shift_x = shift_x.ravel()
+#     shift_y = shift_y.ravel()
+#     shift_z = shift_z.ravel()
+    shifts = np.vstack((shifts_x.ravel(), shifts_y.ravel(), shifts_z.ravel(), shifts_x.ravel(), shifts_y.ravel(), shifts_z.ravel())).transpose()
 
     # Broacast anchors over shifts to enumerate all anchors at all positions
     # in the (H, W) grid:
@@ -800,7 +842,28 @@ def get_field_of_anchors(
         cell_anchors.reshape((1, A, 6)) +
         shifts.reshape((1, K, 6)).transpose((1, 0, 2))
     )
+
+#     box_widths, box_centers_x = np.meshgrid((cell_anchors[:,3] - cell_anchors[:,0]) / 16., shifts_x)
+#     box_heights, box_centers_y = np.meshgrid((cell_anchors[:,4] - cell_anchors[:,1]) / 16., shifts_y)
+#     box_depths, box_centers_z = np.meshgrid((cell_anchors[:,5] - cell_anchors[:,2]) / 16., shifts_z)
+
+#     # Reshape to get a list of (y, x, z) and a list of (h, w, d)
+#     box_centers = np.stack(
+#         [box_centers_y, box_centers_x, box_centers_z], axis=2).reshape([-1, 3])
+#     box_sizes = np.stack([box_heights, box_widths, box_depths], axis=2).reshape([-1, 3])
+
+#     # Convert to corner coordinates (y1, x1, y2, x2, z1, z2)
+#     boxes = np.concatenate([box_centers - 0.5 * box_sizes,
+#                             box_centers + 0.5 * box_sizes], axis=1)
+
+#     field_of_anchors = np.transpose(np.array([boxes[:, 1], boxes[:, 0], boxes[:, 2], boxes[:, 4], boxes[:, 3], boxes[:, 5]]), axes=(1, 0))
+
+#     field_of_anchors = generate_anchors_3D(anchor_sizes, anchor_sizes_z, anchor_aspect_ratios, (65, 65, 65), 16, 16, 16)
+#     stride = 16
+
+
     field_of_anchors = field_of_anchors.reshape((K * A, 6))
+
     foa = FieldOfAnchors(
         field_of_anchors=field_of_anchors.astype(np.float32),
         num_cell_anchors=num_cell_anchors,
@@ -811,32 +874,88 @@ def get_field_of_anchors(
     )
     _threadlocal_foa.cache[cache_key] = foa
     return foa
-    
-def rpn_losses(rpn_ret, rpn_kwargs):
-    h, w, d = rpn_ret['rpn_cls_logits'].shape[2:]
-    rpn_labels_int32 = torch.from_numpy(rpn_kwargs['rpn_labels_int32_wide'][:, :, :h, :w, :d])  # -1 means ignore
-    h, w, d = rpn_ret['rpn_bbox_pred'].shape[2:]
-    rpn_bbox_targets = torch.from_numpy(rpn_kwargs['rpn_bbox_targets_wide'][:, :, :h, :w, :d])
-    rpn_bbox_inside_weights = torch.from_numpy(rpn_kwargs['rpn_bbox_inside_weights_wide'][:, :, :h, :w, :d])
-    rpn_bbox_outside_weights = torch.from_numpy(rpn_kwargs['rpn_bbox_outside_weights_wide'][:, :, :h, :w, :d])
+
+def generate_anchors_3D(scales_xy, scales_z, ratios, shape, feature_stride_xy, feature_stride_z, anchor_stride):
+    """
+    scales: 1D array of anchor sizes in pixels. Example: [32, 64, 128]
+    ratios: 1D array of anchor ratios of width/height. Example: [0.5, 1, 2]
+    shape: [height, width] spatial shape of the feature map over which
+            to generate anchors.
+    feature_stride: Stride of the feature map relative to the image in pixels.
+    anchor_stride: Stride of anchors on the feature map. For example, if the
+        value is 2 then generate anchors for every other feature map pixel.
+    """
+    # Get all combinations of scales and ratios
+
+    scales_xy, ratios_meshed = np.meshgrid(np.array(scales_xy), np.array(ratios))
+    scales_xy = scales_xy.flatten()
+    ratios_meshed = ratios_meshed.flatten()
+
+    # Enumerate heights and widths from scales and ratios
+    heights = scales_xy / np.sqrt(ratios_meshed)
+    widths = scales_xy * np.sqrt(ratios_meshed)
+    depths = np.tile(np.array(scales_z), len(ratios_meshed)//np.array(scales_z)[..., None].shape[0])
+
+    # Enumerate shifts in feature space
+    shifts_y = np.arange(0, shape[0], anchor_stride) * feature_stride_xy #translate from fm positions to input coords.
+    shifts_x = np.arange(0, shape[1], anchor_stride) * feature_stride_xy
+    shifts_z = np.arange(0, shape[2], anchor_stride) * (feature_stride_z)
+    shifts_x, shifts_y, shifts_z = np.meshgrid(shifts_x, shifts_y, shifts_z)
+
+    # Enumerate combinations of shifts, widths, and heights
+    box_widths, box_centers_x = np.meshgrid(widths, shifts_x)
+    box_heights, box_centers_y = np.meshgrid(heights, shifts_y)
+    box_depths, box_centers_z = np.meshgrid(depths, shifts_z)
+
+    # Reshape to get a list of (y, x, z) and a list of (h, w, d)
+    box_centers = np.stack(
+        [box_centers_y, box_centers_x, box_centers_z], axis=2).reshape([-1, 3])
+    box_sizes = np.stack([box_heights, box_widths, box_depths], axis=2).reshape([-1, 3])
+
+    # Convert to corner coordinates (y1, x1, y2, x2, z1, z2)
+    boxes = np.concatenate([box_centers - 0.5 * box_sizes,
+                            box_centers + 0.5 * box_sizes], axis=1)
+
+    boxes = np.transpose(np.array([boxes[:, 1], boxes[:, 0], boxes[:, 2], boxes[:, 4], boxes[:, 3], boxes[:, 5]]), axes=(1, 0))
+    return boxes
+
+def rpn_losses(rpn_cls_logits, rpn_bbox_pred, rpn_labels_int32_wide, rpn_bbox_targets_wide, rpn_bbox_inside_weights_wide, rpn_bbox_outside_weights_wide):
+    h, w, d = rpn_cls_logits.shape[2:]
+    rpn_labels_int32 = torch.from_numpy(rpn_labels_int32_wide[:, :, :h, :w, :d])  # -1 means ignore
+    h, w, d = rpn_bbox_pred.shape[2:]
+    rpn_bbox_targets = torch.from_numpy(rpn_bbox_targets_wide[:, :, :h, :w, :d])
+    rpn_bbox_inside_weights = torch.from_numpy(rpn_bbox_inside_weights_wide[:, :, :h, :w, :d])
+    rpn_bbox_outside_weights = torch.from_numpy(rpn_bbox_outside_weights_wide[:, :, :h, :w, :d])
 
     weight = (rpn_labels_int32 >= 0).float()
     loss_rpn_cls = F.binary_cross_entropy_with_logits(
-        rpn_ret['rpn_cls_logits'].cpu(), rpn_labels_int32.float(), weight, reduction='sum')
+        rpn_cls_logits.cpu(), rpn_labels_int32.float(), weight, reduction='sum')
     loss_rpn_cls /= weight.sum()
 
-    loss_rpn_bbox = net_utils.smooth_l1_loss(
-        rpn_ret['rpn_bbox_pred'].cpu(), rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights,
-        beta=1/9)
+#     loss_rpn_bbox = net_utils.smooth_l1_loss(
+#         rpn_bbox_pred.cpu(), rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights,
+#         beta=1/9)
+    
+    loss_rpn_bbox = net_utils.compute_diou(
+        rpn_bbox_pred.cpu(), rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights)
+    
+#     print("RPN BBOX LOSS: ", loss_rpn_bbox)
+#     print("bbox pred sum:", rpn_bbox_pred.sum())
+#     print("bbox target sum:", rpn_bbox_targets.sum())
+#     print("box diff: ", (rpn_bbox_pred.cpu() - rpn_bbox_targets).sum())
+#     print("rpn_bbox_inside_weights sum", rpn_bbox_inside_weights.sum())
+#     print("rpn_bbox_outside_weights sum", rpn_bbox_outside_weights.sum())
+
+#     indices = torch.nonzero(rpn_bbox_inside_weights == 1, as_tuple=True)
+#     rpn_pred_deltas = rpn_bbox_pred.cpu()
+#     # Pick bbox deltas that contribute to the loss
+#     rpn_pred_deltas = rpn_pred_deltas[indices]
+#     # Trim target bounding box deltas to the same length as rpn_bbox.
+#     target_deltas = rpn_bbox_targets[:rpn_pred_deltas.size()[0], :]
+#     # Smooth L1 loss
+#     import pdb; pdb.set_trace()
+#     loss_rpn_bbox = F.smooth_l1_loss(rpn_pred_deltas, target_deltas)
+    
+#     loss_rpn_bbox = F.smooth_l1_loss(rpn_bbox_pred.cuda(), rpn_bbox_targets.cuda())
 
     return loss_rpn_cls, loss_rpn_bbox
-
-class RPN_Loss(nn.Module):
-    """Add losses for a single scale RPN model (i.e., no FPN)."""
-    
-    def __init__(self, cfg, name="rpn_loss"):
-        super(RPN_Loss, self).__init__()
-
-    def forward(self, x, y):
-        
-        return {'loss': []}

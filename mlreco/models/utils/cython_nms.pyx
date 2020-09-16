@@ -37,11 +37,13 @@ cdef inline np.float32_t min(np.float32_t a, np.float32_t b) nogil:
 def nms(np.ndarray[np.float32_t, ndim=2] dets, np.float32_t thresh):
     cdef np.ndarray[np.float32_t, ndim=1] x1 = dets[:, 0]
     cdef np.ndarray[np.float32_t, ndim=1] y1 = dets[:, 1]
-    cdef np.ndarray[np.float32_t, ndim=1] x2 = dets[:, 2]
-    cdef np.ndarray[np.float32_t, ndim=1] y2 = dets[:, 3]
-    cdef np.ndarray[np.float32_t, ndim=1] scores = dets[:, 4]
+    cdef np.ndarray[np.float32_t, ndim=1] z1 = dets[:, 2]
+    cdef np.ndarray[np.float32_t, ndim=1] x2 = dets[:, 3]
+    cdef np.ndarray[np.float32_t, ndim=1] y2 = dets[:, 4]
+    cdef np.ndarray[np.float32_t, ndim=1] z2 = dets[:, 5]
+    cdef np.ndarray[np.float32_t, ndim=1] scores = dets[:, 6]
 
-    cdef np.ndarray[np.float32_t, ndim=1] areas = (x2 - x1 + 1) * (y2 - y1 + 1)
+    cdef np.ndarray[np.float32_t, ndim=1] areas = (x2 - x1 + 1) * (y2 - y1 + 1) * (z2 - z1 + 1)
     cdef np.ndarray[np.int_t, ndim=1] order = scores.argsort()[::-1]
 
     cdef int ndets = dets.shape[0]
@@ -49,14 +51,15 @@ def nms(np.ndarray[np.float32_t, ndim=2] dets, np.float32_t thresh):
             np.zeros((ndets), dtype=np.int)
 
     # nominal indices
-    cdef int _i, _j
+    cdef int _i, _j, _k
     # sorted indices
-    cdef int i, j
+    cdef int i, j, k
     # temp variables for box i's (the box currently under consideration)
-    cdef np.float32_t ix1, iy1, ix2, iy2, iarea
+    cdef np.float32_t ix1, iy1, iz1, ix2, iy2, iz2, iarea
+    cdef np.float32_t jx1, jy1, jz1, jx2, jy2, jz2, jarea
     # variables for computing overlap with box j (lower scoring box)
-    cdef np.float32_t xx1, yy1, xx2, yy2
-    cdef np.float32_t w, h
+    cdef np.float32_t xx1, yy1, zz1, xx2, yy2, zz2
+    cdef np.float32_t w, h, d
     cdef np.float32_t inter, ovr
 
     with nogil:
@@ -66,23 +69,43 @@ def nms(np.ndarray[np.float32_t, ndim=2] dets, np.float32_t thresh):
               continue
           ix1 = x1[i]
           iy1 = y1[i]
+          iz1 = z1[i]
           ix2 = x2[i]
           iy2 = y2[i]
+          iz2 = z2[i]
           iarea = areas[i]
           for _j in range(_i + 1, ndets):
               j = order[_j]
               if suppressed[j] == 1:
                   continue
-              xx1 = max(ix1, x1[j])
-              yy1 = max(iy1, y1[j])
-              xx2 = min(ix2, x2[j])
-              yy2 = min(iy2, y2[j])
-              w = max(0.0, xx2 - xx1 + 1)
-              h = max(0.0, yy2 - yy1 + 1)
-              inter = w * h
-              ovr = inter / (iarea + areas[j] - inter)
-              if ovr >= thresh:
-                  suppressed[j] = 1
+              jx1 = x1[j]
+              jy1 = y1[j]
+              jz1 = z1[j]
+              jx2 = x2[j]
+              jy2 = y2[j]
+              jz2 = z2[j]
+              jarea = areas[j]
+              for _k in range(_j + 1, ndets):
+                  k = order[_k]
+                  xx1_t = max(ix1, jx1)
+                  xx1 = max(xx1_t, x1[k])
+                  yy1_t = max(iy1, jy1)
+                  yy1 = max(yy1_t, y1[k])
+                  zz1_t = max(iz1, jz1)
+                  zz1 = max(zz1_t, z1[k])
+                  xx2_t = min(ix2, jx2)
+                  xx2 = min(xx2_t, x2[k])
+                  yy2_t = min(iy2, jy2)
+                  yy2 = min(yy2_t, y2[k])
+                  zz2_t = min(iz2, jz2)
+                  zz2 = min(zz2_t, z2[k])
+                  w = max(0.0, xx2 - xx1 + 1)
+                  h = max(0.0, yy2 - yy1 + 1)
+                  d = max(0.0, zz2 - zz1 + 1)
+                  inter = w * h * d
+                  ovr = inter / (iarea + jarea + areas[k] - inter)
+                  if ovr >= thresh:
+                      suppressed[j] = 1
 
     return np.where(suppressed == 0)[0]
 

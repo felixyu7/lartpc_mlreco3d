@@ -82,11 +82,11 @@ def im_list_to_blob(ims):
     max_shape = get_max_shape([im.shape[:3] for im in ims])
 
     num_images = len(ims)
-    blob = np.zeros(
-        (num_images, max_shape[0], max_shape[1], max_shape[2], 3), dtype=np.float32)
+#     blob = np.zeros(
+#         (num_images, max_shape[0], max_shape[1], max_shape[2], 3), dtype=np.float32)
     for i in range(num_images):
         im = ims[i]
-        blob[i, 0:im.shape[0], 0:im.shape[1], 0:im.shape[2], :] = im
+        blob = im.reshape((1, 1024, 1024, 1024, 3))
     # Move channels (axis 3) to axis 1
     # Axis order will become: (batch elem, channel, height, width)
     channel_swap = (0, 4, 1, 2, 3)
@@ -137,18 +137,18 @@ def prep_im_for_blob(im, pixel_means, target_sizes, max_size):
     #         kp_thresh=2,
     #         plain_img=True
     #     )
-    im_shape = im.shape
-    im_size_min = np.min(im_shape[0:3])
-    im_size_max = np.max(im_shape[0:3])
+#     im_shape = im.shape
+#     im_size_min = np.min(im_shape[0:3])
+#     im_size_max = np.max(im_shape[0:3])
 
-    ims = []
-    im_scales = []
-    for target_size in target_sizes:
-        im_scale = get_target_scale(im_size_min, im_size_max, target_size, max_size)
-#         im_resized = cv2.resize(im, None, None, fx=im_scale, fy=im_scale,
-#                                 interpolation=cv2.INTER_LINEAR)
-        ims.append(im)
-        im_scales.append(im_scale)
+    ims = [im]
+    im_scales = [1.]
+#     for target_size in target_sizes:
+#         im_scale = get_target_scale(im_size_min, im_size_max, target_size, max_size)
+# #         im_resized = cv2.resize(im, None, None, fx=im_scale, fy=im_scale,
+# #                                 interpolation=cv2.INTER_LINEAR)
+#         ims.append(im)
+#         im_scales.append(im_scale)
     return ims, im_scales
 
 
