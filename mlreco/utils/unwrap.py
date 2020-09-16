@@ -173,9 +173,10 @@ def unwrap_scn(data_blob, outputs, data_dim, avoid_keys):
             if not d.shape[0] in unwrap_map:
                 batch_map = {}
                 batch_id_loc = data_dim if d.shape[1] > data_dim else -1
-                batch_idx = np.unique(d[:,batch_id_loc])
+                # batch_idx = np.unique(d[:,batch_id_loc])
+                # temp fix for non existant list containing batch idx
+                batch_idx = np.array([0])
                 # ensure these are integer values
-                # print(batch_idx)
                 assert(len(batch_idx) == len(np.unique(batch_idx.astype(np.int32))))
                 for b in batch_idx:
                     batch_map[b] = d[:,batch_id_loc] == b
