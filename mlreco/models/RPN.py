@@ -932,12 +932,12 @@ def rpn_losses(rpn_cls_logits, rpn_bbox_pred, rpn_labels_int32_wide, rpn_bbox_ta
         rpn_cls_logits.cpu(), rpn_labels_int32.float(), weight, reduction='sum')
     loss_rpn_cls /= weight.sum()
 
-#     loss_rpn_bbox = net_utils.smooth_l1_loss(
-#         rpn_bbox_pred.cpu(), rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights,
-#         beta=1/9)
+    loss_rpn_bbox = net_utils.smooth_l1_loss(
+        rpn_bbox_pred.cpu(), rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights,
+        beta=1/9)
     
-    loss_rpn_bbox = net_utils.compute_diou(
-        rpn_bbox_pred.cpu(), rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights)
+#     loss_rpn_bbox = net_utils.compute_diou(
+#         rpn_bbox_pred.cpu(), rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights)
     
 #     print("RPN BBOX LOSS: ", loss_rpn_bbox)
 #     print("bbox pred sum:", rpn_bbox_pred.sum())
