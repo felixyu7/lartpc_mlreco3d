@@ -875,50 +875,6 @@ def get_field_of_anchors(
     _threadlocal_foa.cache[cache_key] = foa
     return foa
 
-def generate_anchors_3D(scales_xy, scales_z, ratios, shape, feature_stride_xy, feature_stride_z, anchor_stride):
-    """
-    scales: 1D array of anchor sizes in pixels. Example: [32, 64, 128]
-    ratios: 1D array of anchor ratios of width/height. Example: [0.5, 1, 2]
-    shape: [height, width] spatial shape of the feature map over which
-            to generate anchors.
-    feature_stride: Stride of the feature map relative to the image in pixels.
-    anchor_stride: Stride of anchors on the feature map. For example, if the
-        value is 2 then generate anchors for every other feature map pixel.
-    """
-    # Get all combinations of scales and ratios
-
-    scales_xy, ratios_meshed = np.meshgrid(np.array(scales_xy), np.array(ratios))
-    scales_xy = scales_xy.flatten()
-    ratios_meshed = ratios_meshed.flatten()
-
-    # Enumerate heights and widths from scales and ratios
-    heights = scales_xy / np.sqrt(ratios_meshed)
-    widths = scales_xy * np.sqrt(ratios_meshed)
-    depths = np.tile(np.array(scales_z), len(ratios_meshed)//np.array(scales_z)[..., None].shape[0])
-
-    # Enumerate shifts in feature space
-    shifts_y = np.arange(0, shape[0], anchor_stride) * feature_stride_xy #translate from fm positions to input coords.
-    shifts_x = np.arange(0, shape[1], anchor_stride) * feature_stride_xy
-    shifts_z = np.arange(0, shape[2], anchor_stride) * (feature_stride_z)
-    shifts_x, shifts_y, shifts_z = np.meshgrid(shifts_x, shifts_y, shifts_z)
-
-    # Enumerate combinations of shifts, widths, and heights
-    box_widths, box_centers_x = np.meshgrid(widths, shifts_x)
-    box_heights, box_centers_y = np.meshgrid(heights, shifts_y)
-    box_depths, box_centers_z = np.meshgrid(depths, shifts_z)
-
-    # Reshape to get a list of (y, x, z) and a list of (h, w, d)
-    box_centers = np.stack(
-        [box_centers_y, box_centers_x, box_centers_z], axis=2).reshape([-1, 3])
-    box_sizes = np.stack([box_heights, box_widths, box_depths], axis=2).reshape([-1, 3])
-
-    # Convert to corner coordinates (y1, x1, y2, x2, z1, z2)
-    boxes = np.concatenate([box_centers - 0.5 * box_sizes,
-                            box_centers + 0.5 * box_sizes], axis=1)
-
-    boxes = np.transpose(np.array([boxes[:, 1], boxes[:, 0], boxes[:, 2], boxes[:, 4], boxes[:, 3], boxes[:, 5]]), axes=(1, 0))
-    return boxes
-
 def rpn_losses(rpn_cls_logits, rpn_bbox_pred, rpn_labels_int32_wide, rpn_bbox_targets_wide, rpn_bbox_inside_weights_wide, rpn_bbox_outside_weights_wide):
     h, w, d = rpn_cls_logits.shape[2:]
     rpn_labels_int32 = torch.from_numpy(rpn_labels_int32_wide[:, :, :h, :w, :d])  # -1 means ignore
@@ -938,24 +894,5 @@ def rpn_losses(rpn_cls_logits, rpn_bbox_pred, rpn_labels_int32_wide, rpn_bbox_ta
     
 #     loss_rpn_bbox = net_utils.compute_diou(
 #         rpn_bbox_pred.cpu(), rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights)
-    
-#     print("RPN BBOX LOSS: ", loss_rpn_bbox)
-#     print("bbox pred sum:", rpn_bbox_pred.sum())
-#     print("bbox target sum:", rpn_bbox_targets.sum())
-#     print("box diff: ", (rpn_bbox_pred.cpu() - rpn_bbox_targets).sum())
-#     print("rpn_bbox_inside_weights sum", rpn_bbox_inside_weights.sum())
-#     print("rpn_bbox_outside_weights sum", rpn_bbox_outside_weights.sum())
-
-#     indices = torch.nonzero(rpn_bbox_inside_weights == 1, as_tuple=True)
-#     rpn_pred_deltas = rpn_bbox_pred.cpu()
-#     # Pick bbox deltas that contribute to the loss
-#     rpn_pred_deltas = rpn_pred_deltas[indices]
-#     # Trim target bounding box deltas to the same length as rpn_bbox.
-#     target_deltas = rpn_bbox_targets[:rpn_pred_deltas.size()[0], :]
-#     # Smooth L1 loss
-#     import pdb; pdb.set_trace()
-#     loss_rpn_bbox = F.smooth_l1_loss(rpn_pred_deltas, target_deltas)
-    
-#     loss_rpn_bbox = F.smooth_l1_loss(rpn_bbox_pred.cuda(), rpn_bbox_targets.cuda())
 
     return loss_rpn_cls, loss_rpn_bbox
