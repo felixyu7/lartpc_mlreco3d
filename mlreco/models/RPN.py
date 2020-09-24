@@ -31,8 +31,8 @@ class RPN(nn.Module):
         super(RPN,self).__init__()
         self.model_config = cfg[name]
         self.validation = False
-        self.dim_in = 1024
-        self.dim_out = 1024
+        self.dim_in = self.model_config.get('dim_in', 1024)
+        self.dim_out = self.model_config.get('dim_out', 1024)
         self.spatial_scale = 1/16
         anchors = generate_anchors(
             stride=1. / self.spatial_scale,
@@ -72,7 +72,7 @@ class RPN(nn.Module):
         """
 
         rpn_conv = F.relu(self.RPN_conv(x), inplace=True)
-        
+
         rpn_cls_logits = self.RPN_cls_score(rpn_conv)
 
         rpn_bbox_pred = self.RPN_bbox_pred(rpn_conv)
@@ -169,9 +169,9 @@ def _ratio_enum(anchor, scales_xy, scales_z, ratios):
     size = w * h * d
 #     size_xy = w * h
 #     size_ratios_xy = size_xy / ratios
-    
+
 #     size_ratios_z = d / [2, 1, 0.5]
-            
+
     scales_xy, ratios_meshed = np.meshgrid(np.array(scales_xy), np.array(ratios))
 #     scales_xy, scales_z, ratios_meshed = np.meshgrid(np.array(scales_xy), np.array(scales_z), np.array(ratios))
 #     scales_z = scales_z.flatten()
@@ -270,23 +270,23 @@ class GenerateProposalsOp(nn.Module):
         all_anchors = self._anchors[np.newaxis, :, :] + shifts[:, np.newaxis, :]
         all_anchors = all_anchors.reshape((K * A, 6))
 #         all_anchors = torch.from_numpy(all_anchors).type_as(scores)
-        
+
 #         box_widths, box_centers_x = np.meshgrid(self._anchors[:,3] - self._anchors[:,0], shift_x)
 #         box_heights, box_centers_y = np.meshgrid(self._anchors[:,4] - self._anchors[:,1], shift_y)
 #         box_depths, box_centers_z = np.meshgrid(self._anchors[:,5] - self._anchors[:,2], shift_z)
-        
+
 #         # Reshape to get a list of (y, x, z) and a list of (h, w, d)
 #         box_centers = np.stack(
 #             [box_centers_y, box_centers_x, box_centers_z], axis=2).reshape([-1, 3])
 #         box_sizes = np.stack([box_heights, box_widths, box_depths], axis=2).reshape([-1, 3])
-        
+
 #         # Convert to corner coordinates (y1, x1, y2, x2, z1, z2)
 #         boxes = np.concatenate([box_centers - 0.5 * box_sizes,
 #                                 box_centers + 0.5 * box_sizes], axis=1)
-        
+
 # #         i = [1, 0, 4, 3, 2, 5]
 #         all_anchors = np.transpose(np.array([boxes[:, 1], boxes[:, 0], boxes[:, 2], boxes[:, 4], boxes[:, 3], boxes[:, 5]]), axes=(1, 0))
-        
+
         rois = np.empty((0, 7), dtype=np.float32)
         roi_probs = np.empty((0, 1), dtype=np.float32)
         for im_i in range(num_images):
@@ -372,7 +372,7 @@ class GenerateProposalsOp(nn.Module):
 
             proposals = proposals[keep, :]
             scores = scores[keep]
-        
+
         return proposals, scores
 
 
@@ -487,7 +487,7 @@ def _merge_proposal_boxes_into_roidb(roidb, box_list):
             # Those boxes with non-zero overlap with gt boxes
             I = np.where(maxes > 0)[0]
             # Record max overlaps with the class of the appropriate gt box
-            
+
             gt_overlaps[I, gt_classes[argmaxes[I]]] = maxes[I]
             box_to_gt_ind_map[I] = gt_inds[argmaxes[I]]
         # print("entry['boxes'].shape",entry['boxes'].shape)
@@ -536,7 +536,7 @@ def _add_class_assignments(roidb):
         # if max overlap > 0, the class must be a fg class (not class 0)
         nonzero_inds = np.where(max_overlaps > 0)[0]
         assert all(max_classes[nonzero_inds] != 0)
-        
+
 def get_rpn_blob_names(is_training=True):
     """Blob names used by RPN."""
     # im_info: (height, width, image scale)
@@ -571,7 +571,7 @@ def add_rpn_blobs(blobs, im_scales, roidb):
         gt_inds = np.where(
             (entry['gt_classes'] > 0)
         )[0]
-        
+
         gt_rois = entry['boxes'][gt_inds, :] * scale
         # TODO(rbg): gt_boxes is poorly named;
         # should be something like 'gt_rois_info'
@@ -737,7 +737,7 @@ def _get_rpn_blobs(im_height, im_width, im_depth, foas, all_anchors, gt_boxes):
         W = foa.field_size
         D = foa.field_size
         A = foa.num_cell_anchors
-        end_idx = start_idx + H * W * D * A 
+        end_idx = start_idx + H * W * D * A
         _labels = labels[start_idx:end_idx]
         _bbox_targets = bbox_targets[start_idx:end_idx, :]
         _bbox_inside_weights = bbox_inside_weights[start_idx:end_idx, :]
@@ -786,7 +786,7 @@ def unmap(data, count, inds, fill=0):
         ret = np.empty((count, ) + data.shape[1:], dtype=data.dtype)
         ret.fill(fill)
         ret[inds, :] = data
-        
+
     return ret
 
 def get_field_of_anchors(
@@ -804,7 +804,7 @@ def get_field_of_anchors(
     cell_anchors = generate_anchors(
         stride=stride, scales_xy=anchor_sizes, scales_z=anchor_sizes_z, aspect_ratios=anchor_aspect_ratios
     )
-    
+
     num_cell_anchors = cell_anchors.shape[0]
 
     # Generate canonical proposals from shifted anchors
@@ -822,9 +822,9 @@ def get_field_of_anchors(
     shifts_y = np.arange(0, field_size, 1) * stride
     shifts_z = np.arange(0, field_size, 1) * stride
     shifts_x, shifts_y, shifts_z = np.meshgrid(shifts_x, shifts_y, shifts_z)
-    
+
 #     import pdb; pdb.set_trace()
-    
+
 #     shift_x = shift_x.ravel()
 #     shift_y = shift_y.ravel()
 #     shift_z = shift_z.ravel()
@@ -891,7 +891,7 @@ def rpn_losses(rpn_cls_logits, rpn_bbox_pred, rpn_labels_int32_wide, rpn_bbox_ta
     loss_rpn_bbox = net_utils.smooth_l1_loss(
         rpn_bbox_pred.cpu(), rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights,
         beta=1/9)
-    
+
 #     loss_rpn_bbox = net_utils.compute_diou(
 #         rpn_bbox_pred.cpu(), rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights)
 

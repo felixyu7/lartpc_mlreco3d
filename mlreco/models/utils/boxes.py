@@ -49,8 +49,8 @@ import warnings
 import numpy as np
 import torch
 
-import mlreco.models.utils.cython_bbox as cython_bbox
-import mlreco.models.utils.cython_nms as cython_nms
+#import mlreco.models.utils.cython_bbox as cython_bbox
+#import mlreco.models.utils.cython_nms as cython_nms
 import mlreco.models.nms.nms as c_nms
 
 # bbox_overlaps = cython_bbox.bbox_overlaps
@@ -98,7 +98,7 @@ def bbox_overlaps(boxes1, boxes2):
     For better performance, pass the largest set first and the smaller second.
     :return: (#boxes1, #boxes2), ious of each box of 1 machted with each of 2
     """
-    
+
     # Areas of anchors and GT boxes
     volume1 = (boxes1[:, 3] - boxes1[:, 0] + 1) * (boxes1[:, 4] - boxes1[:, 1] + 1) * (boxes1[:, 5] - boxes1[:, 2] + 1)
     volume2 = (boxes2[:, 3] - boxes2[:, 0] + 1) * (boxes2[:, 4] - boxes2[:, 1] + 1) * (boxes2[:, 5] - boxes2[:, 2] + 1)
@@ -234,7 +234,7 @@ def clip_tiled_boxes(boxes, im_shape):
     boxes[:, 4::6] = np.maximum(np.minimum(boxes[:, 4::6], im_shape[0] - 1), 0)
     # z2 < im_shape[2]
     boxes[:, 5::6] = np.maximum(np.minimum(boxes[:, 5::6], im_shape[2] - 1), 0)
-    
+
     return boxes
 
 # def clip_tiled_boxes(boxes, window):
@@ -366,7 +366,7 @@ def bbox_transform_inv(boxes, gt_boxes, weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)):
     gt_ctr_x = gt_boxes[:, 0] + 0.5 * gt_widths
     gt_ctr_y = gt_boxes[:, 1] + 0.5 * gt_heights
     gt_ctr_z = gt_boxes[:, 2] + 0.5 * gt_depths
-    
+
     wx, wy, wz, ww, wh, wd = weights
     targets_dx = wx * (gt_ctr_x - ex_ctr_x) / ex_widths
     targets_dy = wy * (gt_ctr_y - ex_ctr_y) / ex_heights
@@ -374,7 +374,7 @@ def bbox_transform_inv(boxes, gt_boxes, weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)):
     targets_dw = ww * np.log(gt_widths / ex_widths)
     targets_dh = wh * np.log(gt_heights / ex_heights)
     targets_dd = wd * np.log(gt_depths / ex_depths)
-    
+
     targets = np.vstack((targets_dx, targets_dy, targets_dz, targets_dw,
                          targets_dh, targets_dd)).transpose()
     return targets
@@ -399,7 +399,7 @@ def bbox_transform_inv(boxes, gt_boxes, weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)):
 #     dx = (gt_center_x - center_x) / width
 #     dh = torch.log(gt_height / height)
 #     dw = torch.log(gt_width / width)
-    
+
 #     depth = box[:, 5] - box[:, 2] + 1
 #     center_z = box[:, 2] + 0.5 * depth
 #     gt_depth = gt_box[:, 5] - gt_box[:, 2] + 1
@@ -407,7 +407,7 @@ def bbox_transform_inv(boxes, gt_boxes, weights=(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)):
 #     dz = (gt_center_z - center_z) / depth
 #     dd = torch.log(gt_depth / depth)
 #     result = torch.stack([dx, dy, dz, dw, dh, dd], dim=1)
-    
+
 #     result = result.cpu().numpy()
 #     return result
 
@@ -523,7 +523,7 @@ def nms(boxes, scores, iou_threshold):
 #     x1 = box_coords[:, 0]
 #     y2 = box_coords[:, 4]
 #     x2 = box_coords[:, 3]
-#     assert np.all(y1 <= y2) and np.all(x1 <= x2), """"the definition of the coordinates is crucially important here: 
+#     assert np.all(y1 <= y2) and np.all(x1 <= x2), """"the definition of the coordinates is crucially important here:
 #             coordinates of which maxima are taken need to be the lower coordinates"""
 #     areas = (x2 - x1) * (y2 - y1)
 
@@ -531,7 +531,7 @@ def nms(boxes, scores, iou_threshold):
 #     if is_3d: # 3-dim case
 #         z1 = box_coords[:, 2]
 #         z2 = box_coords[:, 5]
-#         assert np.all(z1<=z2), """"the definition of the coordinates is crucially important here: 
+#         assert np.all(z1<=z2), """"the definition of the coordinates is crucially important here:
 #            coordinates of which maxima are taken need to be the lower coordinates"""
 #         areas *= (z2 - z1)
 
